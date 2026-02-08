@@ -17,7 +17,7 @@ LINE ─→ Express.js (Webhook) ─→ LLM Provider (自動偵測模式)
                                  └── 混合模式：兩者皆有
                                       └── 簡單→Groq, 複雜→Claude
 SQLite (better-sqlite3) + node-cron
-~800 行代碼，9 個源碼檔案
+11 個源碼檔案
 ```
 
 ## 目錄結構
@@ -25,13 +25,15 @@ SQLite (better-sqlite3) + node-cron
 ```
 src/
 ├── index.ts              # Express 伺服器 + LINE Webhook 處理
-├── config.ts             # 環境變數 + 常數
+├── config.ts             # 環境變數 + 常數 + 模型註冊表
 ├── llm.ts                # LLM Provider Pattern (Claude-only / Groq-only / 混合)
 ├── db.ts                 # SQLite schema + CRUD 操作
 ├── memory.ts             # 使用者記憶系統 (讀/寫/更新)
 ├── skill-manager.ts      # 技能建立 + 管理 (自然語言 → JSON)
-├── skill-importer.ts     # GitHub URL 匯入 + 公開技能目錄瀏覽
-├── skill-executor.ts     # 技能觸發判斷 + 執行
+├── skill-importer.ts     # GitHub URL 匯入 + 公開技能目錄瀏覽 + AI 提取 api_config
+├── skill-executor.ts     # 技能觸發判斷 + 動態工具呼叫執行
+├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立 ToolDefinition[]
+├── http-executor.ts      # 通用 HTTP 執行器 + bearer token 快取
 └── scheduler.ts          # node-cron 排程任務
 ```
 
@@ -40,13 +42,15 @@ src/
 | 檔案 | 職責 | 依賴 |
 |------|------|------|
 | `index.ts` | HTTP 伺服器、LINE Webhook 接收與回覆、訊息路由 | config, llm, db, skill-executor |
-| `config.ts` | `process.env` 讀取、常數定義、型別匯出 | 無 |
+| `config.ts` | `process.env` 讀取、常數定義、型別匯出、模型註冊表（白名單驗證） | 無 |
 | `llm.ts` | Provider Pattern：自動偵測 API Key 決定模式、Tool Calling、Structured Output、錯誤重試 | config |
-| `db.ts` | SQLite 初始化、表建立、users/skills/messages CRUD | config |
+| `db.ts` | SQLite 初始化、表建立、users/skills/messages CRUD、credentials 欄位 | config |
 | `memory.ts` | 使用者記憶的 Markdown 格式管理、上下文注入 | db |
 | `skill-manager.ts` | 解析自然語言意圖、生成技能 JSON、CRUD 技能 | llm, db |
-| `skill-importer.ts` | 解析 GitHub URL、fetch SKILL.md、AI 格式轉換、安全檢查、技能目錄瀏覽 | llm, db, skill-manager |
-| `skill-executor.ts` | 關鍵字/模式/cron 觸發判斷、執行技能 prompt | llm, db, memory |
+| `skill-importer.ts` | 解析 GitHub URL、fetch SKILL.md、AI 格式轉換、安全檢查、技能目錄瀏覽、AI 提取 api_config | llm, db, skill-manager |
+| `skill-executor.ts` | 關鍵字/模式/cron 觸發判斷、動態工具呼叫迴圈（max 5 次）、執行技能 prompt | llm, db, memory, dynamic-tool-builder, http-executor |
+| `dynamic-tool-builder.ts` | 從 ApiConfig 動態建立 ToolDefinition[]（api_call 通用工具） | config |
+| `http-executor.ts` | 通用 HTTP 執行器、bearer token 自動登入與快取、api_key 注入 | config, db |
 | `scheduler.ts` | node-cron 排程、定時技能觸發、任務日誌 | db, skill-executor |
 
 ## 技術棧
@@ -77,8 +81,9 @@ GROQ_API_KEY=                # Groq API (免費) — 填此 key 即啟用 Groq-o
 # 都不填 → 啟動失敗
 
 # 選填
-CLAUDE_DEFAULT_MODEL=claude-haiku-4-5-20250501    # Claude-only 主力模型
-CLAUDE_COMPLEX_MODEL=claude-sonnet-4-5-20250514   # Claude-only 複雜任務模型
+CLAUDE_DEFAULT_MODEL=claude-haiku-4-5-20250501    # Claude 主力模型
+CLAUDE_COMPLEX_MODEL=claude-sonnet-4-5-20250514   # Claude 複雜任務模型
+GROQ_MODEL=qwen/qwen3-32b                        # Groq 模型
 PORT=3000                    # HTTP port
 NODE_ENV=development         # development | production
 ```
@@ -87,7 +92,7 @@ NODE_ENV=development         # development | production
 
 ```bash
 npm install          # 安裝依賴
-npm run dev          # 開發模式 (ts-node + 熱重載)
+npm run dev          # 開發模式 (tsx watch 熱重載)
 npm run build        # 編譯 TypeScript
 npm start            # 生產模式 (node dist/)
 ```
@@ -123,7 +128,8 @@ npm start            # 生產模式 (node dist/)
 
 ```sql
 -- 使用者
-users (id, line_user_id, display_name, memory_md, created_at, updated_at)
+users (id, line_user_id, display_name, memory_md, credentials, created_at, updated_at)
+-- credentials: JSON，按服務名稱儲存認證資訊，例如 {"erp": {"username": "...", "password": "..."}}
 
 -- 技能
 skills (
@@ -131,7 +137,8 @@ skills (
   trigger_type,    -- 'keyword' | 'pattern' | 'cron' | 'manual' | 'always'
   trigger_value,
   prompt,
-  tools,           -- JSON array: 技能可使用的內建工具 ["web_search", "get_weather", ...]
+  tools,           -- JSON array (legacy，由 api_config 取代)
+  api_config,      -- JSON: ApiConfig | null（外部 API 連線設定）
   enabled,
   source_type,     -- 'user_created' | 'github_import' | 'catalog' | 'shared'
   source_url,      -- 匯入來源 URL（追溯用）
@@ -149,7 +156,8 @@ scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, ena
 
 ### Groq API (Groq-only / 混合模式)
 
-- Model ID: `qwen/qwen3-32b`（通用）、`qwen-qwq-32b`（推理）
+- 預設 Model ID: `qwen/qwen3-32b`（通用），另支援 `qwen-qwq-32b`（推理）、`moonshotai/kimi-k2-instruct-0905`、`meta-llama/llama-4-scout-17b-16e-instruct`、`meta-llama/llama-3.3-70b-versatile`、`mistralai/mistral-saba-24b` 等
+- 透過 `GROQ_MODEL` 環境變數切換，啟動時白名單驗證
 - 使用 OpenAI 兼容格式 (openai SDK 或 fetch)
 - Tool Calling 用於技能建立 (function schema 強制 JSON 格式)
 - 免費額度：RPM 30, RPD 14400
@@ -200,7 +208,7 @@ scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, ena
 - Skills 是「prompt-only」設計，不執行任何外部程式碼
 - 匯入時掃描危險關鍵字（prompt injection 模式）
 - System Prompt 優先權保護（系統指令 > 技能 prompt > 用戶輸入）
-- 限制 prompt 長度上限（5000 字元）
+- 限制 prompt 長度上限（10000 字元）
 - 保留 source URL 供追溯
 
 ## LINE Webhook 要點

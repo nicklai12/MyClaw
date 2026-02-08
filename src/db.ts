@@ -90,6 +90,22 @@ function createTables(): void {
     );
   `);
 
+  // 為已存在的 users 表新增 credentials 欄位（SQLite 不支援 IF NOT EXISTS for columns）
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN credentials TEXT DEFAULT '{}'`);
+    console.log('[db] 已新增 users.credentials 欄位');
+  } catch {
+    // 欄位已存在，忽略
+  }
+
+  // 為已存在的 skills 表新增 api_config 欄位（動態 API 設定）
+  try {
+    db.exec(`ALTER TABLE skills ADD COLUMN api_config TEXT DEFAULT ''`);
+    console.log('[db] 已新增 skills.api_config 欄位');
+  } catch {
+    // 欄位已存在，忽略
+  }
+
   console.log('[db] 資料表已就緒 (users, skills, messages, scheduled_tasks)');
 }
 
@@ -148,10 +164,11 @@ export function createSkill(
   sourceUrl: string = ''
 ): Skill {
   const toolsJson = JSON.stringify(skill.tools || []);
+  const apiConfigJson = skill.api_config ? JSON.stringify(skill.api_config) : '';
 
   const result = db.prepare(`
-    INSERT INTO skills (user_id, name, description, trigger_type, trigger_value, prompt, tools, source_type, source_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO skills (user_id, name, description, trigger_type, trigger_value, prompt, tools, api_config, source_type, source_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     userId,
     skill.name,
@@ -160,6 +177,7 @@ export function createSkill(
     skill.trigger.value,
     skill.prompt,
     toolsJson,
+    apiConfigJson,
     sourceType,
     sourceUrl
   );
@@ -168,7 +186,7 @@ export function createSkill(
     'SELECT * FROM skills WHERE id = ?'
   ).get(result.lastInsertRowid) as Skill;
 
-  console.log(`[db] 技能已建立: "${skill.name}" (id=${newSkill.id}, user=${userId})`);
+  console.log(`[db] 技能已建立: "${skill.name}" (id=${newSkill.id}, user=${userId}, hasApiConfig=${!!apiConfigJson})`);
   return newSkill;
 }
 
@@ -195,6 +213,51 @@ export function deleteSkill(skillId: number): void {
   db.prepare('DELETE FROM scheduled_tasks WHERE skill_id = ?').run(skillId);
   db.prepare('DELETE FROM skills WHERE id = ?').run(skillId);
   console.log(`[db] 技能已刪除: id=${skillId}`);
+}
+
+/**
+ * 根據 source_url 查詢使用者的技能（用於重複匯入偵測）
+ */
+export function findSkillBySourceUrl(userId: number, sourceUrl: string): Skill | null {
+  if (!sourceUrl) return null;
+  const row = db.prepare(
+    'SELECT * FROM skills WHERE user_id = ? AND source_url = ?'
+  ).get(userId, sourceUrl) as Skill | undefined;
+  return row || null;
+}
+
+/**
+ * 更新已存在的技能（用於重複匯入時覆蓋舊版本）
+ */
+export function updateSkill(
+  skillId: number,
+  skill: SkillCreateRequest
+): Skill {
+  const toolsJson = JSON.stringify(skill.tools || []);
+  const apiConfigJson = skill.api_config ? JSON.stringify(skill.api_config) : '';
+
+  db.prepare(`
+    UPDATE skills SET
+      name = ?, description = ?, trigger_type = ?, trigger_value = ?,
+      prompt = ?, tools = ?, api_config = ?
+    WHERE id = ?
+  `).run(
+    skill.name,
+    skill.description,
+    skill.trigger.type,
+    skill.trigger.value,
+    skill.prompt,
+    toolsJson,
+    apiConfigJson,
+    skillId
+  );
+
+  const updated = db.prepare(
+    'SELECT * FROM skills WHERE id = ?'
+  ).get(skillId) as Skill;
+
+  console.log(`[db] 技能已更新: "${skill.name}" (id=${skillId}, hasApiConfig=${!!apiConfigJson})`);
+  return updated;
 }
 
 // ============================================
@@ -247,4 +310,53 @@ export function updateLastRun(taskId: number): void {
   db.prepare(
     "UPDATE scheduled_tasks SET last_run = datetime('now') WHERE id = ?"
   ).run(taskId);
+}
+
+// ============================================
+// Credentials CRUD
+// ============================================
+
+/**
+ * 取得使用者的某個服務憑證
+ * credentials JSON 格式：{"erp": {"username": "xxx", "password": "yyy"}, ...}
+ */
+export function getUserCredentials(userId: number, service: string): Record<string, string> | null {
+  const row = db.prepare(
+    'SELECT credentials FROM users WHERE id = ?'
+  ).get(userId) as { credentials: string } | undefined;
+
+  if (!row) return null;
+
+  try {
+    const allCreds = JSON.parse(row.credentials || '{}') as Record<string, Record<string, string>>;
+    return allCreds[service] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 儲存使用者的某個服務憑證
+ */
+export function saveUserCredentials(userId: number, service: string, creds: Record<string, string>): void {
+  const row = db.prepare(
+    'SELECT credentials FROM users WHERE id = ?'
+  ).get(userId) as { credentials: string } | undefined;
+
+  let allCreds: Record<string, Record<string, string>> = {};
+  if (row) {
+    try {
+      allCreds = JSON.parse(row.credentials || '{}') as Record<string, Record<string, string>>;
+    } catch {
+      allCreds = {};
+    }
+  }
+
+  allCreds[service] = creds;
+
+  db.prepare(
+    "UPDATE users SET credentials = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(JSON.stringify(allCreds), userId);
+
+  console.log(`[db] 使用者 ${userId} 的 ${service} 憑證已儲存`);
 }

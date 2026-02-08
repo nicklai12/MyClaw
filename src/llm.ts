@@ -156,11 +156,8 @@ async function chatWithClaude(
 
   const maxTokens = options.maxTokens || MAX_TOKENS_DEFAULT;
 
-  // 轉換 messages 為 Anthropic 格式
-  const messages: Anthropic.MessageParam[] = options.messages.map((msg) => ({
-    role: msg.role,
-    content: msg.content,
-  }));
+  // 轉換 messages 為 Anthropic 格式（支援 tool result 多輪對話）
+  const messages: Anthropic.MessageParam[] = convertToAnthropicMessages(options.messages);
 
   // 建構 system prompt（支援 Prompt Caching）
   const systemBlocks: Anthropic.TextBlockParam[] = options.systemPrompt
@@ -182,12 +179,19 @@ async function chatWithClaude(
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
+      // tool_choice: 強制 AI 使用工具（防止造假資料）
+      const toolChoice = options.toolChoice === 'any'
+        ? { type: 'any' as const }
+        : options.toolChoice === 'none'
+          ? { type: 'none' as const }
+          : { type: 'auto' as const };
+
       const response = await claudeClient.messages.create({
         model,
         max_tokens: maxTokens,
         ...(systemBlocks.length > 0 ? { system: systemBlocks } : {}),
         messages,
-        ...(tools && tools.length > 0 ? { tools } : {}),
+        ...(tools && tools.length > 0 ? { tools, tool_choice: toolChoice } : {}),
       });
 
       // 解析回應：處理 text block 和 tool_use block
@@ -255,6 +259,53 @@ async function chatWithClaude(
 }
 
 /**
+ * 將 ChatMessage[] 轉換為 Anthropic MessageParam[]
+ * 處理 role='tool' → tool_result，以及 assistant 的 toolCalls → tool_use blocks
+ */
+function convertToAnthropicMessages(msgs: ChatMessage[]): Anthropic.MessageParam[] {
+  const result: Anthropic.MessageParam[] = [];
+
+  for (const msg of msgs) {
+    if (msg.role === 'user') {
+      result.push({ role: 'user', content: msg.content });
+    } else if (msg.role === 'assistant') {
+      // 如果 assistant 有 toolCalls，需要包含 tool_use blocks
+      if (msg.toolCalls && msg.toolCalls.length > 0) {
+        const contentBlocks: (Anthropic.TextBlockParam | Anthropic.ToolUseBlockParam)[] = [];
+        if (msg.content) {
+          contentBlocks.push({ type: 'text', text: msg.content });
+        }
+        for (const tc of msg.toolCalls) {
+          contentBlocks.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.name,
+            input: tc.input,
+          });
+        }
+        result.push({ role: 'assistant', content: contentBlocks });
+      } else {
+        result.push({ role: 'assistant', content: msg.content });
+      }
+    } else if (msg.role === 'tool') {
+      // tool result → Anthropic 的 user message with tool_result block
+      result.push({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: msg.toolCallId || '',
+            content: msg.content,
+          },
+        ],
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
  * 將 config.ts 的 ToolDefinition 轉換為 Anthropic Tool 格式
  */
 function convertToolToAnthropic(tool: ToolDefinition): Anthropic.Tool {
@@ -297,18 +348,41 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
     });
   }
 
-  // 對話歷史
+  // 對話歷史（支援 tool result 多輪對話）
   for (const msg of options.messages) {
-    // 只有模型需要時才附加 /no_think（Qwen3 系列）
-    const isLastUser =
-      msg === options.messages[options.messages.length - 1] &&
-      msg.role === 'user';
-    const shouldAppendNoThink = isLastUser && modelInfo?.needsNoThink;
+    if (msg.role === 'tool') {
+      // tool result → OpenAI tool message
+      messages.push({
+        role: 'tool',
+        content: msg.content,
+        tool_call_id: msg.toolCallId || '',
+      } as OpenAI.ChatCompletionToolMessageParam);
+    } else if (msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0) {
+      // assistant with tool_calls
+      messages.push({
+        role: 'assistant',
+        content: msg.content || null,
+        tool_calls: msg.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: 'function' as const,
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.input),
+          },
+        })),
+      } as OpenAI.ChatCompletionAssistantMessageParam);
+    } else {
+      // 一般 user / assistant 訊息
+      const isLastUser =
+        msg === options.messages[options.messages.length - 1] &&
+        msg.role === 'user';
+      const shouldAppendNoThink = isLastUser && modelInfo?.needsNoThink;
 
-    messages.push({
-      role: msg.role,
-      content: shouldAppendNoThink ? `${msg.content}\n/no_think` : msg.content,
-    });
+      messages.push({
+        role: msg.role as 'user' | 'assistant',
+        content: shouldAppendNoThink ? `${msg.content}\n/no_think` : msg.content,
+      });
+    }
   }
 
   // 轉換 tools 為 OpenAI 格式
@@ -320,11 +394,18 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
+      // tool_choice: 強制 AI 使用工具（防止造假資料）
+      const toolChoice = options.toolChoice === 'any'
+        ? 'required' as const      // OpenAI 格式：'required' = 強制使用工具
+        : options.toolChoice === 'none'
+          ? 'none' as const
+          : 'auto' as const;
+
       const response = await groqClient.chat.completions.create({
         model,
         max_tokens: maxTokens,
         messages,
-        ...(tools && tools.length > 0 ? { tools } : {}),
+        ...(tools && tools.length > 0 ? { tools, tool_choice: toolChoice } : {}),
       });
 
       const choice = response.choices[0];

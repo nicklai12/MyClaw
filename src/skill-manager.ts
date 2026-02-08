@@ -3,82 +3,59 @@
 // ============================================
 
 import { chat } from './llm';
-import { createSkill, getUserSkills, toggleSkill, deleteSkill } from './db';
-import type { SkillCreateRequest, Skill, ToolDefinition } from './config';
+import { createSkill, getUserSkills, toggleSkill, deleteSkill, updateSkill } from './db';
+import type { SkillCreateRequest, Skill } from './config';
 
 // ============================================
-// Tool Calling Schema — 讓 AI 結構化輸出技能配置
+// Prompt-based JSON — 不依賴 Tool Calling 的技能解析
 // ============================================
-
-const CREATE_SKILL_TOOL: ToolDefinition = {
-  name: 'create_skill',
-  description:
-    '根據使用者的自然語言描述，建立一個新的技能配置。只有當使用者明確表達想要建立新技能、設定提醒、自動化任務時才使用此工具。',
-  input_schema: {
-    type: 'object',
-    properties: {
-      name: {
-        type: 'string',
-        description: '技能名稱，簡短的繁體中文名稱，例如「每日天氣提醒」',
-      },
-      description: {
-        type: 'string',
-        description: '技能功能描述，一句話說明這個技能做什麼',
-      },
-      trigger: {
-        type: 'object',
-        properties: {
-          type: {
-            type: 'string',
-            enum: ['keyword', 'pattern', 'cron', 'manual', 'always'],
-            description:
-              '觸發類型：keyword=關鍵字觸發、pattern=正則匹配、cron=定時執行、manual=手動觸發、always=每次對話都執行',
-          },
-          value: {
-            type: 'string',
-            description:
-              '觸發值：keyword 時為關鍵字、pattern 時為正則表達式、cron 時為 cron 表達式、manual/always 可為空字串',
-          },
-        },
-        required: ['type', 'value'],
-      },
-      prompt: {
-        type: 'string',
-        description:
-          '給 AI 的執行指令，描述這個技能被觸發時要做什麼。使用繁體中文撰寫，清晰具體。',
-      },
-      tools: {
-        type: 'array',
-        items: { type: 'string' },
-        description:
-          '技能可使用的內建工具列表，可選值：web_search, memory_read, memory_write, get_weather, get_time',
-      },
-    },
-    required: ['name', 'description', 'trigger', 'prompt'],
-  },
-};
+// 研究發現 Kimi K2 在 Groq 上的 Tool Calling 失敗率 ~5-10%，
+// 改用 prompt 指令讓 AI 直接輸出 JSON，繞過 Tool Calling 問題。
+// 參見：research/15-kimi-k2-skill-execution/README.md
 
 const SKILL_PARSE_SYSTEM_PROMPT = `你是 MyClaw LINE AI 助理的技能建立助手。
 
 使用者會用自然語言描述他們想要的功能，你需要判斷這是否是一個技能建立請求。
 
-如果使用者的訊息是在描述一個想要自動化的任務、定時提醒、或特定觸發條件下的回應行為，
-請使用 create_skill 工具來建立技能配置。
+## 判斷規則
 
-觸發類型判斷規則：
-- 如果提到「每天」「每週」「每小時」等時間週期 → cron
-- 如果提到「當我說...」「當我傳...」等特定關鍵字 → keyword
-- 如果需要匹配 URL、數字、特定格式 → pattern
-- 如果是通用對話風格設定（如「用台語回我」）→ always
-- 如果沒有明確觸發條件 → manual
+如果使用者的訊息是在描述一個想要自動化的任務、定時提醒、或特定觸發條件下的回應行為，請回傳技能配置 JSON。
 
-cron 表達式範例：
+如果使用者的訊息不像是在建立技能（例如閒聊、問問題、一般對話），請只回覆 NOT_SKILL 這四個字，不要輸出其他任何內容。
+
+## 技能配置 JSON 格式
+
+當判斷為技能建立請求時，只回傳以下格式的 JSON，不要包含任何其他文字：
+
+{"name":"技能名稱","description":"一句話功能描述","trigger_type":"keyword","trigger_value":"觸發值","prompt":"給 AI 的執行指令"}
+
+## 欄位說明
+
+- name：簡短的繁體中文名稱，例如「每日天氣提醒」
+- description：一句話說明這個技能做什麼
+- trigger_type：觸發類型，只能是以下之一：keyword、pattern、cron、manual、always
+- trigger_value：觸發值（keyword 時為關鍵字、pattern 時為正則表達式、cron 時為 cron 表達式、manual/always 為空字串）
+- prompt：給 AI 的執行指令，使用繁體中文撰寫，清晰具體
+
+## 觸發類型判斷規則
+
+- 提到「每天」「每週」「每小時」等時間週期 → cron
+- 提到「當我說...」「當我傳...」等特定關鍵字 → keyword
+- 需要匹配 URL、數字、特定格式 → pattern
+- 通用對話風格設定（如「用台語回我」）→ always
+- 沒有明確觸發條件 → manual
+
+## cron 表達式範例
+
 - 每天早上 8 點：0 8 * * *
 - 每天下午 6 點：0 18 * * *
 - 每週一早上 9 點：0 9 * * 1
 - 每小時：0 * * * *
 
-如果使用者的訊息不像是在建立技能（例如閒聊、問問題、一般對話），請不要使用任何工具，直接回覆說明即可。`;
+## 重要
+
+- 只回傳純 JSON 或 NOT_SKILL，不要加 \`\`\` 標記，不要加說明文字
+- JSON 必須是單行，不要換行`;
 
 // ============================================
 // 技能管理意圖偵測關鍵字
@@ -96,6 +73,8 @@ const MANAGEMENT_KEYWORDS = [
   '啟用',
   '刪除技能',
   '移除技能',
+  '更新技能',
+  '修改技能',
   '管理技能',
 ];
 
@@ -104,7 +83,8 @@ const MANAGEMENT_KEYWORDS = [
 // ============================================
 
 /**
- * 解析使用者的自然語言，透過 LLM Tool Calling 生成技能配置。
+ * 解析使用者的自然語言，透過 Prompt-based JSON 生成技能配置。
+ * 不依賴 Tool Calling，改用 prompt 指令讓 AI 直接輸出 JSON。
  * 如果使用者文字不像是在建立技能，回傳 null。
  */
 export async function parseSkillFromText(
@@ -114,50 +94,103 @@ export async function parseSkillFromText(
     const response = await chat({
       messages: [{ role: 'user', content: userText }],
       systemPrompt: SKILL_PARSE_SYSTEM_PROMPT,
-      tools: [CREATE_SKILL_TOOL],
       complexity: 'moderate',
       maxTokens: 1024,
     });
 
-    // 如果 AI 沒有呼叫 create_skill 工具，表示不是技能建立意圖
-    if (!response.toolCalls || response.toolCalls.length === 0) {
+    const content = (response.content || '').trim();
+
+    // AI 判斷不是技能建立意圖
+    if (!content || content === 'NOT_SKILL' || content.startsWith('NOT_SKILL')) {
       return null;
     }
 
-    const toolCall = response.toolCalls.find(
-      (tc) => tc.name === 'create_skill'
-    );
-    if (!toolCall) {
+    // 從回應中提取 JSON
+    const json = extractJsonFromText(content);
+    if (!json) {
+      console.warn(
+        `[skill-manager] 無法從 AI 回應中提取 JSON: ${content.substring(0, 200)}`
+      );
       return null;
     }
 
-    const input = toolCall.input as {
-      name: string;
-      description: string;
-      trigger: { type: string; value: string };
-      prompt: string;
-      tools?: string[];
-    };
+    // 解析 JSON
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      console.warn(
+        `[skill-manager] JSON 解析失敗: ${json.substring(0, 200)}`
+      );
+      return null;
+    }
 
     // 驗證必要欄位
-    if (!input.name || !input.trigger?.type || !input.prompt) {
+    const name = typeof parsed.name === 'string' ? parsed.name : '';
+    const triggerType = typeof parsed.trigger_type === 'string' ? parsed.trigger_type : '';
+    const prompt = typeof parsed.prompt === 'string' ? parsed.prompt : '';
+
+    if (!name || !triggerType || !prompt) {
+      console.warn(
+        `[skill-manager] JSON 缺少必要欄位: name=${!!name}, trigger_type=${!!triggerType}, prompt=${!!prompt}`
+      );
+      return null;
+    }
+
+    // 驗證 trigger_type 是合法值
+    const validTriggerTypes = ['keyword', 'pattern', 'cron', 'manual', 'always'];
+    if (!validTriggerTypes.includes(triggerType)) {
+      console.warn(
+        `[skill-manager] 無效的 trigger_type: ${triggerType}`
+      );
       return null;
     }
 
     const request: SkillCreateRequest = {
-      name: input.name,
-      description: input.description || '',
+      name,
+      description: typeof parsed.description === 'string' ? parsed.description : '',
       trigger: {
-        type: input.trigger.type as SkillCreateRequest['trigger']['type'],
-        value: input.trigger.value || '',
+        type: triggerType as SkillCreateRequest['trigger']['type'],
+        value: typeof parsed.trigger_value === 'string' ? parsed.trigger_value : '',
       },
-      prompt: input.prompt,
-      tools: input.tools,
+      prompt,
+      tools: Array.isArray(parsed.tools) ? parsed.tools as string[] : undefined,
     };
 
     return request;
   } catch (error) {
     console.error('[skill-manager] parseSkillFromText 錯誤:', error);
+    return null;
+  }
+}
+
+/**
+ * 從 AI 回應文字中提取 JSON 字串。
+ * 處理常見的格式問題：markdown code fences、前後多餘文字等。
+ */
+function extractJsonFromText(text: string): string | null {
+  let cleaned = text.trim();
+
+  // 移除 markdown code fences: ```json ... ``` 或 ``` ... ```
+  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+
+  // 嘗試找到 JSON 物件的起始和結束位置
+  const startIdx = cleaned.indexOf('{');
+  const endIdx = cleaned.lastIndexOf('}');
+  if (startIdx !== -1 && endIdx > startIdx) {
+    cleaned = cleaned.substring(startIdx, endIdx + 1);
+  } else {
+    return null;
+  }
+
+  // 驗證是否為有效 JSON
+  try {
+    JSON.parse(cleaned);
+    return cleaned;
+  } catch {
     return null;
   }
 }
@@ -232,6 +265,23 @@ export async function handleSkillManagement(
       return `已啟用技能「${target.name}」。`;
     }
 
+    // 更新技能（修改觸發方式、描述等）
+    if (normalized.includes('更新技能') || normalized.includes('修改技能')) {
+      const skillName =
+        extractSkillName(normalized, '更新技能') ||
+        extractSkillName(normalized, '修改技能');
+      if (!skillName) {
+        return '請指定要更新的技能名稱和新內容，例如：「更新技能 每日天氣提醒」\n\n目前更新技能最簡單的方式是重新匯入同一個 GitHub URL，系統會自動更新。\n\n你也可以先「刪除技能 [名稱]」再重新建立。';
+      }
+      const skills = await getUserSkills(userId);
+      const target = findSkillByName(skills, skillName);
+      if (!target) {
+        return `找不到名為「${skillName}」的技能。輸入「我的技能」查看所有技能。`;
+      }
+      // 目前支援重新匯入更新，手動更新引導用戶刪除重建
+      return `技能「${target.name}」目前可透過以下方式更新：\n\n1. 重新匯入：傳送原始 GitHub URL，系統會自動更新\n2. 刪除重建：「刪除技能 ${target.name}」後重新建立`;
+    }
+
     // 刪除技能
     if (normalized.includes('刪除技能') || normalized.includes('移除技能')) {
       const skillName =
@@ -249,7 +299,7 @@ export async function handleSkillManagement(
       return `已刪除技能「${target.name}」。`;
     }
 
-    return '我不確定你想做什麼。你可以說：\n- 「我的技能」查看技能列表\n- 「停用 [技能名稱]」停用技能\n- 「啟用 [技能名稱]」啟用技能\n- 「刪除技能 [技能名稱]」刪除技能';
+    return '我不確定你想做什麼。你可以說：\n- 「我的技能」查看技能列表\n- 「停用 [技能名稱]」停用技能\n- 「啟用 [技能名稱]」啟用技能\n- 「更新技能 [技能名稱]」更新技能\n- 「刪除技能 [技能名稱]」刪除技能';
   } catch (error) {
     console.error('[skill-manager] handleSkillManagement 錯誤:', error);
     return '處理技能管理指令時發生錯誤，請稍後再試。';

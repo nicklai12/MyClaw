@@ -12,7 +12,7 @@ import {
 } from '@line/bot-sdk';
 import { loadConfig, AppConfig, ChatMessage, RECENT_MESSAGES_COUNT } from './config';
 import { initLLM, chat, getProviderInfo } from './llm';
-import { initDB, getOrCreateUser, saveMessage, getRecentMessages, getEnabledSkills } from './db';
+import { initDB, getOrCreateUser, saveMessage, getRecentMessages, getEnabledSkills, getUserSkills, createSkill, findSkillBySourceUrl, updateSkill } from './db';
 import { getUserMemory, updateMemory, buildMemoryUpdatePrompt } from './memory';
 import { isSkillManagementIntent, handleSkillManagement } from './skill-manager';
 import { findMatchingSkill, executeSkill } from './skill-executor';
@@ -102,12 +102,37 @@ async function handleTextMessage(
     if (importCheck.isImport && importCheck.url) {
       try {
         const result = await importSkillFromURL(importCheck.url, user.id);
+
+        // 檢查是否已存在同 source_url 的技能 → 更新而非重複建立
+        const existingSkill = findSkillBySourceUrl(user.id, result.source.url);
+        let savedSkill;
+        let actionLabel: string;
+
+        if (existingSkill) {
+          savedSkill = updateSkill(existingSkill.id, result.skill);
+          actionLabel = '已更新';
+          console.log(`[index] 技能已更新（重複匯入）: id=${savedSkill.id}, name="${savedSkill.name}"`);
+        } else {
+          savedSkill = createSkill(
+            user.id,
+            result.skill,
+            result.source.type as 'github_import',
+            result.source.url
+          );
+          actionLabel = '已成功匯入';
+          console.log(`[index] 技能已儲存到資料庫: id=${savedSkill.id}, name="${savedSkill.name}"`);
+        }
+
         const warningText = result.warnings.length > 0
           ? `\n\n注意：\n${result.warnings.map(w => `- ${w}`).join('\n')}`
           : '';
-        const reply = `已成功匯入技能「${result.skill.name}」！\n\n` +
+        const apiInfo = result.skill.api_config
+          ? `\nAPI 連線：${result.skill.api_config.base_url}`
+          : '';
+        const reply = `${actionLabel}技能「${result.skill.name}」！\n\n` +
           `描述：${result.skill.description}\n` +
           `觸發方式：${result.skill.trigger.type} (${result.skill.trigger.value || '無'})` +
+          apiInfo +
           warningText;
         await replyToUser(replyToken, userId, reply);
         saveMessage(user.id, 'assistant', reply);
@@ -178,7 +203,8 @@ async function handleTextMessage(
       chatHistory.push({ role: 'user', content: text });
     }
 
-    const systemPrompt = buildSystemPrompt(memory, user.display_name);
+    const userSkills = getUserSkills(user.id);
+    const systemPrompt = buildSystemPrompt(memory, user.display_name, userSkills);
 
     const response = await chat({
       messages: chatHistory,
@@ -212,15 +238,26 @@ async function handleTextMessage(
 // ============================================
 
 /**
- * 建構包含使用者記憶的 system prompt
+ * 建構包含使用者記憶和技能資訊的 system prompt
  */
-function buildSystemPrompt(memory: string, displayName: string): string {
+function buildSystemPrompt(memory: string, displayName: string, skills: import('./config').Skill[] = []): string {
   let prompt = `你是一個友善、聰明的 LINE 個人 AI 助理「MyClaw」。
 你會用繁體中文回答，回覆簡潔有重點。
 你能記住使用者的偏好和習慣，提供個人化的幫助。`;
 
   if (displayName) {
     prompt += `\n\n使用者名稱: ${displayName}`;
+  }
+
+  // 注入真實的技能資訊，讓 AI 回答時依據實際資料庫
+  if (skills.length > 0) {
+    const skillLines = skills.map((s, i) => {
+      const status = s.enabled ? 'ON' : 'OFF';
+      return `${i + 1}. [${status}] ${s.name} — ${s.description}（觸發：${s.trigger_type}${s.trigger_value ? ` "${s.trigger_value}"` : ''}）`;
+    });
+    prompt += `\n\n## 使用者的技能（來自資料庫，共 ${skills.length} 個）\n${skillLines.join('\n')}`;
+  } else {
+    prompt += `\n\n## 使用者的技能\n此使用者目前沒有任何技能。`;
   }
 
   if (memory && memory.trim().length > 0) {
@@ -230,6 +267,7 @@ function buildSystemPrompt(memory: string, displayName: string): string {
   prompt += `\n\n## 注意事項
 - 回覆保持簡潔，不要過度冗長
 - 使用繁體中文
+- 當使用者詢問有什麼技能時，必須根據上方「使用者的技能」區塊的資料庫資料回答，不要自己編造
 - 如果使用者想要建立技能，引導他們說出技能名稱、觸發方式和功能描述
 - 如果使用者傳送 GitHub URL，詢問是否要匯入為技能`;
 

@@ -84,8 +84,10 @@ export function loadConfig(): AppConfig {
 export type Complexity = 'simple' | 'moderate' | 'complex';
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'tool';
   content: string;
+  toolCallId?: string;    // role='tool' 時必填，對應 tool_use block 的 id
+  toolCalls?: ToolCall[];  // role='assistant' 時，LLM 回傳的 tool calls
 }
 
 export interface ToolDefinition {
@@ -104,6 +106,7 @@ export interface ChatOptions {
   messages: ChatMessage[];
   systemPrompt?: string;
   tools?: ToolDefinition[];
+  toolChoice?: 'auto' | 'any' | 'none';  // any = 強制使用工具，防止 AI 造假
   maxTokens?: number;
   complexity?: Complexity;
   jsonMode?: boolean;
@@ -144,11 +147,31 @@ export interface Skill {
   trigger_type: TriggerType;
   trigger_value: string;
   prompt: string;
-  tools: string; // JSON array string
+  tools: string; // JSON array string (legacy, 由 api_config 取代)
+  api_config: string; // JSON string of ApiConfig | null
   enabled: number; // SQLite boolean: 0 | 1
   source_type: SourceType;
   source_url: string;
   created_at: string;
+}
+
+// ============================================
+// API 連線設定型別（僅連線資訊，不含端點定義）
+// ============================================
+// 端點知識存在技能的 prompt 中（SKILL.md 內容），
+// AI 自行讀取 prompt 決定呼叫哪個 API，透過通用 api_call 工具執行。
+
+export interface ApiConfig {
+  base_url: string;
+  auth: {
+    type: 'bearer_token' | 'api_key' | 'none';
+    login_endpoint?: string;     // bearer_token: 登入取得 token 的端點
+    credentials_service?: string; // bearer_token: credentials 在 DB 中的 service 名稱
+    token_field?: string;         // bearer_token: 回傳 JSON 中 token 的欄位名
+    token_ttl_minutes?: number;   // bearer_token: token 過期時間
+    api_key_header?: string;      // api_key: header 名稱
+    api_key_service?: string;     // api_key: credentials 中的 key 名稱
+  };
 }
 
 export interface Message {
@@ -182,6 +205,7 @@ export interface SkillCreateRequest {
   };
   prompt: string;
   tools?: string[];
+  api_config?: ApiConfig;
 }
 
 export interface SkillImportResult {
@@ -356,7 +380,7 @@ export function getModelInfo(modelId: string): ModelInfo | undefined {
 // 常數
 // ============================================
 
-export const MAX_PROMPT_LENGTH = 5000;
+export const MAX_PROMPT_LENGTH = 10000;
 export const MAX_SKILLS_PER_USER = 20;
 export const MAX_TOKENS_DEFAULT = 1024;
 export const MAX_MEMORY_LENGTH = 10000;

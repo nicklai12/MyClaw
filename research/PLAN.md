@@ -289,6 +289,8 @@ research/
 ├── 14-user-model-selection/             # 模型用戶自選機制研究
 ├── 15-kimi-k2-skill-execution/          # Kimi K2 技能執行能力研究
 ├── 15-claude-skills-vs-myclaw/          # Claude Code Skills vs MyClaw 對比研究
+├── 17-agent-skills-testing/             # Agent Skills 動態架構深度測試
+├── 18-gemini-anti-fabrication/          # Gemini 模型防造假可行性研究
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```
@@ -314,11 +316,348 @@ research/
 | LINE Reply Token 超時 | 回應失敗 | 先回「處理中」+ Push |
 | Codespace URL 變更 | Webhook 失效 | 每次啟動更新 LINE 設定 |
 
+### Round 7 研究（2026-02-08）— API Tool Calling 功能測試
+
+#### 16a. 技能匯入/刪除功能測試 (`16-skill-import-delete-test/`)
+
+**測試結論：基本功能正常，但有數個需要修復的問題。**
+
+##### 匯入技能測試
+
+- **GitHub URL 偵測** ✅ 正常：`isSkillImportIntent()` 能偵測 `github.com/owner/repo/tree/branch/path` 格式，且 URL 含 `skill` 關鍵字時自動視為匯入意圖
+- **完整匯入鏈路** ✅ 正常：`parseGitHubUrl()` → `fetchSkillContent()` → `parseSkillMd()` → `convertToMyClawFormat()` → `detectToolsFromContent()` → `createSkill()`
+- **`detectToolsFromContent()` 工具偵測** ✅ 正常：能從 SKILL.md 原始內容偵測 18 個 ERP API 端點路徑並映射到工具名稱，作為 AI 轉換的後備方案
+- **`tools` 欄位填入** ✅ 已修復：之前的 bug 是 AI 轉換時遺漏 tools，現在由 `detectToolsFromContent()` 自動補充
+
+##### 發現的問題
+
+| # | 問題 | 嚴重性 | 說明 |
+|---|------|--------|------|
+| 1 | **重複匯入無防護** | ⚠️ 中 | 重複匯入同一 SKILL.md 會建立多筆同名技能，DB 無唯一約束。兩個同名技能同時啟用且 trigger 相同（keyword: 查詢），只有排序靠前的會被觸發 |
+| 2 | **URL 正則 trailing 問題** | ⚠️ 低 | `GITHUB_URL_REGEX` 結尾要求 `(?:\s|$)`，如果 URL 後面緊跟標點（如 `。`）會匹配失敗 |
+| 3 | **匯入成功前 `createSkill` 已在 index.ts 呼叫** | ⚠️ 低 | `importSkillFromURL()` 回傳結果後由 `index.ts` 呼叫 `createSkill()` 儲存，流程正確但使用者無「確認預覽」步驟 |
+| 4 | **`findSkillByName()` 模糊搜尋** | ⚠️ 低 | 使用 `includes()` 做模糊匹配，可能誤匹配子字串（如「ERP」匹配到「ERP資料查詢」和「ETL基本資料查詢」取第一筆） |
+
+##### 刪除/管理技能測試
+
+- **刪除** ✅ 正常：`deleteSkill()` 正確先刪 `scheduled_tasks` 再刪 `skills`
+- **啟用/停用** ✅ 正常：已啟用再啟用會提示「已經是啟用狀態」，停用同理
+- **名稱解析** ✅ 正常：`extractSkillName("刪除技能 每日天氣提醒", "刪除技能")` → `"每日天氣提醒"`
+
+---
+
+#### 16b. AI 真實 API 調用驗證 (`16-api-call-verification/`)
+
+**測試結論：Tool Calling Loop 邏輯正確，能確實調用 API，不會造假。但有格式轉換細節需注意。**
+
+##### Tool Calling Loop ✅
+
+- `parseToolNames()` 正確從 `skill.tools` JSON 字串（如 `'["search_employee","list_department"]'`）解析出字串陣列
+- `getToolDefinitions()` 回傳的 ToolDefinition 包含正確的 per-endpoint `input_schema`（gen01/gen02 用於員工、pmc24 用於供應商等）
+- 呼叫 `chat()` 時透過 spread 運算子 `...(toolDefs.length > 0 ? { tools: toolDefs } : {})` 確實傳入 tools
+- Loop 邏輯正確：`while (response.toolCalls.length > 0 && iteration < 5)` → 執行工具 → 回饋結果 → 再次呼叫
+- 5 輪限制合理（ERP 查詢通常 1-2 輪即完成）
+
+##### 訊息格式轉換 ✅（有一個潛在問題）
+
+- **Claude**：`convertToAnthropicMessages()` 正確處理三種角色：
+  - `user` → 直接傳遞
+  - `assistant` + `toolCalls` → 包含 `TextBlockParam` + `ToolUseBlockParam`
+  - `tool` → 轉為 `user` role with `tool_result` content block
+- **Groq**：正確處理 `tool` role + `tool_call_id`，assistant 的 `tool_calls` 格式也正確
+- **⚠️ 潛在問題**：Groq `chatWithGroq` 中 `msg.role as 'user' | 'assistant'` 的型別斷言，若 `msg.role` 為 `'tool'` 但沒有 `toolCallId` 會走到 else 分支，造成角色錯誤。實際上 `tool` 角色的 if 判斷在前面已處理，不會走到 else，但程式碼可以更明確
+
+##### Credential 流程 ✅
+
+- 無帳密時：`executeSkill()` 偵測到 ERP 工具且 `getUserCredentials()` 回傳 null → 自動加入 `set_erp_credentials` 工具
+- `getToken()` 無 credentials 時正確拋出 `ERP_NO_CREDENTIALS`
+- `executeErpTool()` 捕獲此錯誤後回傳 `{ error: true, message: "尚未設定 ERP 帳密..." }` → LLM 收到此訊息會引導用戶設定
+- Token 快取 ✅：`Map<userId, { token, expiresAt }>` 結構，30 分鐘過期
+
+##### 防造假機制 ✅
+
+- `buildSkillSystemPrompt()` 中有明確指示：
+  - `「使用提供的工具呼叫真實 API，不要編造或虛構資料」`
+  - `「如果 API 回傳錯誤，如實告知使用者」`
+  - `「如果用戶尚未設定帳密，使用 set_erp_credentials 工具引導用戶提供帳號密碼」`
+- API 失敗時，`executeErpTool()` 回傳 JSON 錯誤訊息，LLM 能看到真實錯誤並轉告用戶
+
+##### API 路徑一致性 ✅
+
+- 所有路徑已修正，與 SKILL.md 定義一致：
+  - Search: `/api/etl/employee/search` 等（POST）
+  - List: `/api/etl/department` 等（GET，無 `/list` 後綴）
+- 參數 schema 使用正確的欄位代碼（gen01/gen02、pmc24、occ01/occ02 等）
+
+---
+
+#### 16c. Agent Skills 動態架構可行性分析 (`16-dynamic-agent-skills/`)
+
+**核心結論：方案可行，但目前架構確實是「寫死」的，需要重構為動態架構才能實現「不寫任何功能程式碼，只透過 Agent Skills」的目標。**
+
+##### 1. 當前架構是「寫死」的嗎？— **是的**
+
+| 檔案 | 寫死的內容 | 影響 |
+|------|-----------|------|
+| `tool-registry.ts` | 19 個工具的 name、description、input_schema 全部硬編碼 | 新增任何 API 都需修改此檔案 |
+| `erp-client.ts` | 18 個 API 的 URL path、HTTP method 全部硬編碼 | 新增任何端點都需修改此檔案 |
+| `skill-importer.ts` | `detectToolsFromContent()` 只認 ERP API 端點 | 匯入非 ERP 的 Skill 不會偵測到工具 |
+
+**如果要匯入天氣 API 或 Jira API 的 Skill，需要：**
+1. 在 `tool-registry.ts` 手動新增工具定義
+2. 在新的 `xxx-client.ts` 實作 HTTP 呼叫
+3. 在 `skill-importer.ts` 的 `detectToolsFromContent()` 新增偵測規則
+
+**這完全違背了「只透過 Agent Skills」的設計目標。**
+
+##### 2. SKILL.md 包含的資訊量 — **足夠自動生成工具**
+
+分析 ETL SKILL.md 的內容，每個 API 端點都包含：
+- ✅ 端點 URL（如 `/api/etl/employee/search`）
+- ✅ HTTP 方法（POST / GET）
+- ✅ 參數名稱和描述（如 `gen01` 員工編號、`gen02` 員工姓名）
+- ✅ 回傳欄位說明
+- ✅ Base URL（`https://zpos-api-stage.zerozero.com.tw`）
+- ✅ 認證方式（Bearer Token）
+- ✅ Token 管理方式（30 分鐘過期、用帳密登入取得）
+
+**結論：SKILL.md 已包含足夠資訊，讓 AI（或規則解析）自動生成 ToolDefinition + HTTP executor。**
+
+##### 3. 動態架構設計提案
+
+```
+SKILL.md 匯入 → AI 解析 API 定義 → 儲存到 DB → 執行時動態生成工具
+
+匯入階段：
+  SKILL.md → AI 提取 → api_definitions JSON → 儲存到 skills 表
+
+執行階段：
+  skill.api_definitions → 動態生成 ToolDefinition[]
+                       → 通用 HTTP executor 取代 erp-client.ts
+```
+
+**需要的改動：**
+
+| 改動 | 說明 | 工作量 |
+|------|------|--------|
+| DB: skills 表新增 `api_config` 欄位 | 儲存完整的 API 定義 JSON（base_url、auth、endpoints） | ~20 行 |
+| 新增 `src/dynamic-tool-builder.ts` | 從 `api_config` 動態生成 ToolDefinition[] | ~80 行 |
+| 新增 `src/http-executor.ts` | 通用 HTTP executor（替代 erp-client.ts） | ~100 行 |
+| 修改 `skill-importer.ts` | AI 提取 API 定義時輸出完整的 endpoint schema | ~60 行 |
+| 修改 `skill-executor.ts` | 改為從 DB 動態載入工具定義 | ~30 行 |
+| **可移除** `tool-registry.ts` | 不再需要靜態註冊 | -280 行 |
+| **可移除** `erp-client.ts` | 被通用 HTTP executor 取代 | -250 行 |
+
+**`api_config` JSON 格式設計：**
+```json
+{
+  "base_url": "https://zpos-api-stage.zerozero.com.tw",
+  "auth": {
+    "type": "bearer_token",
+    "login_endpoint": "/api/etl/auth/login",
+    "credentials_service": "erp",
+    "token_field": "token",
+    "token_ttl_minutes": 30
+  },
+  "endpoints": [
+    {
+      "tool_name": "search_employee",
+      "description": "搜尋員工資料",
+      "method": "POST",
+      "path": "/api/etl/employee/search",
+      "parameters": [
+        {"name": "gen01", "type": "string", "description": "員工編號"},
+        {"name": "gen02", "type": "string", "description": "員工姓名"}
+      ]
+    },
+    {
+      "tool_name": "list_department",
+      "description": "列出所有部門",
+      "method": "GET",
+      "path": "/api/etl/department",
+      "parameters": []
+    }
+  ]
+}
+```
+
+##### 4. 安全性與限制
+
+| 風險 | 緩解方案 |
+|------|---------|
+| 動態 HTTP 請求可能打到惡意 URL | URL 白名單 / domain 驗證 |
+| 認證資訊洩漏 | credentials 加密儲存、不記錄密碼到 log |
+| API 回傳大量資料 | 限制回傳大小（truncate to 5000 chars） |
+| Prompt injection via API 回傳 | 回傳內容標記為 tool_result，LLM 有 system prompt 優先權保護 |
+
+##### 5. 最終結論
+
+**YES — 動態 Agent Skills 架構完全可行。**
+
+- SKILL.md 已包含足夠資訊自動生成工具
+- LLM 的 tool calling 本身就支援動態工具定義（工具定義就是 JSON，不需要編譯時確定）
+- 改為動態架構後，匯入任何新 Skill（天氣、Jira、CRM...）都不需要寫程式碼
+- 工作量約 ~300 行新程式碼 + 刪除 ~530 行寫死的程式碼
+- **建議分兩階段實施**：
+  1. **Phase 1**（當前）：保持現有 ERP 寫死架構，先驗證 tool calling 端到端可行
+  2. **Phase 2**（下一步）：重構為動態架構，實現真正的「只透過 Agent Skills」
+
+---
+
+#### 16d. 發現的問題總清單
+
+| # | 問題 | 嚴重性 | 類別 | 建議 |
+|---|------|--------|------|------|
+| 1 | 重複匯入同名技能無防護 | ⚠️ 中 | 匯入 | 新增 DB 唯一約束或匯入前檢查 |
+| 2 | 架構是「寫死」的，無法支援非 ERP 的 Skill | ⚠️ 高 | 架構 | Phase 2 重構為動態架構 |
+| 3 | `detectToolsFromContent()` 只認 ERP 端點 | ⚠️ 中 | 匯入 | 動態架構後此函式可移除 |
+| 4 | 匯入無用戶確認預覽步驟 | ⚠️ 低 | 匯入 | 未來加入確認對話 |
+| 5 | Groq tool message 型別斷言可更嚴謹 | ⚠️ 低 | LLM | 加入 `role === 'tool'` 排除 |
+| 6 | `set_erp_credentials` 可能重複加入 toolDefs | ⚠️ 低 | 執行 | 已有 `includes()` 檢查，但檢查的是 `toolNames` 不是 `toolDefs` |
+
+---
+
 ## 下一步
 
-準備好開始實作時，可以說「開始寫代碼」，我會：
-1. 建立新專案目錄 + devcontainer.json
-2. 初始化 package.json + Dockerfile
-3. 按照 MVP 計畫逐步實現
-4. 設定 Railway 一鍵部署按鈕
-5. 建立 `npx create-line-assistant` 腳手架工具
+### 短期（當前驗證）
+1. 修復重複匯入問題（匯入前檢查同名技能是否已存在）
+2. 端到端測試：提供 ERP 帳密 → 觸發查詢 → 確認回傳真實 API 資料
+3. 修復 `set_erp_credentials` 重複加入的邊界問題
+
+### 中期（Phase 2 動態架構）
+1. 設計 `api_config` JSON schema
+2. 實作 `dynamic-tool-builder.ts` + `http-executor.ts`
+3. 修改 `skill-importer.ts`：AI 提取完整 API 定義
+4. 移除 `tool-registry.ts` + `erp-client.ts`（寫死的程式碼）
+5. 驗證：匯入一個全新的 Skill（如天氣 API）不需寫任何程式碼
+
+---
+
+### Round 8 研究（2026-02-08）— Agent Skills 動態架構深度測試
+
+> 完整報告：`research/17-agent-skills-testing/README.md`
+
+#### 17a. 技能匯入/刪除功能測試結果
+
+**匯入**：基本正常，api_config 鏈路端到端完整（匯入提取→DB 儲存→查詢→解析→執行）。
+
+**發現的問題：**
+
+| # | 優先級 | 問題 |
+|---|--------|------|
+| P6 | **高** | 缺少技能更新功能（無 `updateSkill()`） |
+| P7 | **高** | 重複匯入無防護（同 URL 建立多筆同名技能） |
+| P3 | 中 | 匯入無使用者預覽確認（自動儲存） |
+| P2 | 中 | 安全檢查 safe=false 時不阻擋匯入 |
+
+**刪除**：正常（含 scheduled_tasks 級聯刪除）。缺少二次確認。
+
+#### 17b. AI 造假資料根因分析
+
+**tool_choice 傳遞路徑正確**（`toolChoice: 'any'` → Claude `tool_choice: {type:'any'}` / Groq `tool_choice: 'required'`）。
+
+**五個根因（按嚴重度排序）：**
+
+| # | 根因 | 嚴重度 |
+|---|------|--------|
+| A | **無 api_config 的技能完全沒有工具 → tool_choice 機制被繞過** | **致命** |
+| C | System prompt「不要造假」指示只在 hasTools=true 時才出現 | **高** |
+| B | parseApiConfig 靜默失敗，畸形 JSON 降級為無工具 | 中 |
+| D | Groq tool_choice='required' 可靠性 ~90-95% | 中 |
+| E | API 錯誤後 AI 可能在後續輪次編造回覆 | 低 |
+
+**核心問題**：用戶自建的技能不會有 api_config → `hasTools=false` → 完全沒有工具也沒有防造假指示 → AI 100% 會造假。
+
+**建議修復：**
+1. `buildSkillSystemPrompt` 無論 hasTools 為何，都加入「不要編造數據，無法取得真實資料時誠實告知」
+2. 無 api_config 且 prompt 提及 API 的技能，明確告知 AI「你無法存取外部 API」
+3. API 呼叫失敗後加入更強的「不要猜測或編造」指示
+
+#### 17c. Agent Skills 動態架構可行性評估
+
+**結論：有條件可行（Conditionally Feasible）**
+
+Phase 2 重構已完成，目前架構已經是動態的：
+- `api_call` 通用工具（3 個參數：method/path/body）
+- `http-executor` 自動處理 base_url 拼接和認證
+- SKILL.md 全文保留為 skill.prompt，AI 自行閱讀決定呼叫哪個端點
+
+**可行前提：**
+1. SKILL.md 品質好（包含清晰的 API 文件）
+2. Claude 模式 tool calling ~99% 可靠；Groq 需接受 5-10% 失敗率
+3. 適合 RESTful JSON API + 簡單認證
+4. SKILL.md 來源需可信
+
+**需要改善：**
+- P0：API response truncation（防 context 溢出）
+- P0：path 參數驗證（禁止 `/../`、絕對 URL）
+- P1：無工具技能的防造假 system prompt
+- P1：Tool calling 失敗的 graceful fallback
+
+---
+
+### Round 9 研究（2026-02-08）— Gemini 模型防造假可行性
+
+> 完整報告：`research/18-gemini-anti-fabrication/README.md`
+
+#### 18a. Gemini Tool Calling 能力（`18-gemini-anti-fabrication/tool-calling.md`）
+- ❌ **Gemini Tool Calling 可靠性不如 Claude**
+- Gemini `mode: ANY` 成功率 ~85-95%，不如 Claude `tool_choice: any` (~99%)，未明顯優於 Groq (~90-95%)
+- BFCL V4 排名：Claude 穩居前三，Gemini 未進前列
+- Gemini 3 Preview 有 `thought_signature` 並行呼叫 bug，導致 400 錯誤
+- 社群大量回報 function calling 不穩定：500 錯誤、靜默繞過、JSON 偽裝
+
+#### 18b. Gemini 防造假 / Instruction Following（`18-gemini-anti-fabrication/anti-fabrication.md`）
+- ❌ **Gemini 3 系列幻覺率極高**
+- AA-Omniscience 基準：Gemini 3 Pro 幻覺率 **88%**，Claude 4.1 Opus 幻覺率最低
+- Gemini 3 被設計為「優先保持有幫助性」，傾向猜測而非拒絕回答
+- 社群大量回報 Gemini 3 忽略 System Prompt 指示
+- Google 官方建議避免否定約束（「不要...」），但防造假本質就是否定約束
+- Claude 系列更傾向在不確定時誠實說「不知道」
+
+#### 18c. Google Search Grounding（差異化優勢）
+- ✅ **唯一能讓無 API 技能取得真實數據的機制**
+- Gemini 獨有功能：模型回應前自動搜尋 Google，取得可驗證的即時資訊
+- 可與 Function Calling 組合使用，原生支援繁體中文
+- 定價：Gemini 3 Flash 免費 5,000 search/day，超出 $14/1,000 查詢
+- **可部分解決根因 A**（無 api_config 技能沒有工具→造假）：提供 Google Search 作為 fallback
+
+#### 18d. API 整合可行性
+- SDK：`@google/genai`（npm）或 OpenAI 相容模式
+- Gemini 2.5 Flash 免費：10 RPM、250 RPD，月費 ~$0-1
+- Gemini 3 Flash Preview 免費，Gemini 3 Pro Preview **無免費額度**
+- 整合工作量：新增 Gemini provider ~150 行 + Grounding 邏輯 ~50 行
+
+#### 18e. 綜合結論
+
+**Gemini 不能透過更好的 Tool Calling 解決造假問題，但 Google Search Grounding 提供了其他 Provider 沒有的 fallback 機制。**
+
+| 建議 | 說明 |
+|------|------|
+| ✅ 維持 Claude tool_choice: any 作為主力 | 最可靠 (~99%) |
+| ✅ 有限度整合 Gemini Grounding | 僅用於無 API 技能的 Search fallback |
+| ✅ 優先使用 Gemini 2.5 Flash | 穩定 + 免費 + 低成本 |
+| ❌ 不用 Gemini 取代 Claude 做 Tool Calling | 可靠性不如 Claude |
+| ❌ 不用 Gemini 3 Preview 做主力 | 幻覺率太高、指令遵循有問題 |
+
+---
+
+## 下一步（更新版）
+
+### 已完成
+1. ✅ **防造假 system prompt 強化** — 無論 hasTools 為何都加入禁止造假指示
+2. ✅ **API response truncation** — 限制 5000 字元防止 context 溢出
+3. ✅ **path 參數驗證** — 禁止路徑遍歷和絕對 URL
+4. ✅ 重複匯入防護（匯入前檢查同 source_url）
+5. ✅ 新增 `updateSkill()` 功能
+
+### 短期
+6. 端到端測試：匯入 ERP SKILL.md → 設定帳密 → 觸發查詢 → 確認回傳真實 API 資料
+7. 新增 Gemini Grounding provider（選填 `GEMINI_API_KEY`）
+8. 無 API 技能執行時自動啟用 Google Search Grounding fallback
+
+### 中期
+9. 匯入預覽確認流程
+10. 安全檢查阻擋（safe=false 時拒絕匯入）
+11. 支援 Basic Auth
+12. Credential 加密儲存

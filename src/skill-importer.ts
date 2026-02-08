@@ -1,15 +1,18 @@
 // ============================================
 // GitHub URL 匯入 + 公開技能目錄瀏覽
 // ============================================
+// Agent Skills 架構：匯入時只提取最小連線設定（base_url + auth），
+// SKILL.md 完整內容保存為技能 prompt，AI 執行時自行閱讀。
 
 import matter from 'gray-matter';
 import { chat } from './llm';
-import { createSkill } from './db';
 import type {
   SkillCreateRequest,
   SkillImportResult,
   ToolDefinition,
+  ApiConfig,
 } from './config';
+import { MAX_PROMPT_LENGTH } from './config';
 
 // ============================================
 // 常數
@@ -66,13 +69,15 @@ const DANGEROUS_PATTERNS: RegExp[] = [
 ];
 
 // ============================================
-// AI 格式轉換用 Tool Calling Schema
+// AI 格式轉換用 Tool Calling Schema（Agent Skills 架構）
 // ============================================
+// 只提取最小連線設定（base_url + auth），不提取端點清單。
+// 端點知識保留在技能的 prompt 中，AI 執行時自行閱讀 prompt 決定呼叫哪個 API。
 
 const CONVERT_SKILL_TOOL: ToolDefinition = {
   name: 'convert_skill',
   description:
-    '將外部 Agent Skill 格式轉換為 MyClaw 技能格式，包含繁體中文名稱、觸發方式判斷、和 prompt 整理。',
+    '將外部 Agent Skill 格式轉換為 MyClaw 技能格式，包含繁體中文名稱、觸發方式判斷、和 API 連線設定提取。',
   input_schema: {
     type: 'object',
     properties: {
@@ -99,24 +104,63 @@ const CONVERT_SKILL_TOOL: ToolDefinition = {
         },
         required: ['type', 'value'],
       },
-      prompt: {
-        type: 'string',
-        description:
-          '整理後的繁體中文 AI 執行指令，適配 LINE 對話情境，不包含任何程式碼',
-      },
-      tools: {
-        type: 'array',
-        items: { type: 'string' },
-        description: '技能可使用的內建工具',
+      api_config: {
+        type: 'object',
+        description: '僅 API 連線設定（base_url + auth），不含端點清單',
+        properties: {
+          base_url: {
+            type: 'string',
+            description: 'API 基礎 URL（如 https://api.example.com）',
+          },
+          auth: {
+            type: 'object',
+            properties: {
+              type: {
+                type: 'string',
+                enum: ['bearer_token', 'api_key', 'none'],
+                description: '認證方式',
+              },
+              login_endpoint: {
+                type: 'string',
+                description: '登入端點路徑（bearer_token 時使用，如 /api/auth/login）',
+              },
+              credentials_service: {
+                type: 'string',
+                description: '憑證在資料庫中的服務名稱（如 erp、jira）',
+              },
+              token_field: {
+                type: 'string',
+                description: '登入回應中 token 的欄位名稱（如 accessToken）',
+              },
+              token_ttl_minutes: {
+                type: 'number',
+                description: 'Token 有效期限（分鐘）',
+              },
+              api_key_header: {
+                type: 'string',
+                description: 'API Key 的 header 名稱（api_key 時使用）',
+              },
+              api_key_service: {
+                type: 'string',
+                description: 'API Key 在 credentials 中的服務名稱',
+              },
+            },
+            required: ['type'],
+          },
+        },
+        required: ['base_url', 'auth'],
       },
     },
-    required: ['name', 'description', 'trigger', 'prompt'],
+    required: ['name', 'description', 'trigger'],
   },
 };
 
 const CONVERT_SYSTEM_PROMPT = `你是 MyClaw LINE AI 助理的技能格式轉換助手。
 
-你需要將外部的 Agent Skill（通常是英文的 SKILL.md 格式）轉換為 MyClaw 的技能格式。
+你需要將外部的 Agent Skill（通常是 SKILL.md 格式）轉換為 MyClaw 的技能格式。
+
+重要原則：SKILL.md 的完整內容會直接作為技能的 prompt 保存，AI 執行技能時會閱讀這些內容。
+你只需要提取「名稱、描述、觸發方式、API 連線設定」，不需要提取端點清單。
 
 轉換規則：
 1. name：翻譯為繁體中文，簡潔的技能名稱
@@ -127,12 +171,27 @@ const CONVERT_SYSTEM_PROMPT = `你是 MyClaw LINE AI 助理的技能格式轉換
    - 如果技能是定時執行 → cron
    - 如果技能是通用對話風格 → always
    - 其他情況 → manual
-4. prompt：
-   - 保留原始指令的核心功能
-   - 翻譯為繁體中文
-   - 適配 LINE 對話情境（簡潔、友善）
-   - 不要包含任何可執行程式碼
-   - 控制在合理長度內
+
+   ★★ trigger.value 選擇的關鍵原則 ★★
+   觸發關鍵字（keyword 的 value）必須是「用戶在 LINE 聊天中會自然說出的詞」，而非技術術語。
+   例如：
+   - ERP 查詢技能 → 用「查詢」而非「ETL」或「ERP」（用戶會說「查詢員工」「查詢部門」）
+   - 翻譯技能 → 用「翻譯」而非「translate」
+   - 天氣技能 → 用「天氣」而非「weather-api」
+   選一個最常見、最短、最自然的中文觸發詞。
+
+4. api_config（僅連線設定，不含端點！）：
+   如果 SKILL.md 涉及 API 呼叫，只提取連線資訊：
+   - base_url：API 的基礎 URL
+   - auth：認證方式
+     - bearer_token：需設定 login_endpoint、credentials_service、token_field、token_ttl_minutes
+     - api_key：需設定 api_key_header、api_key_service
+     - none：不需認證
+   - 不要提取端點清單！端點資訊已在 SKILL.md 原文中，AI 執行時會自行閱讀。
+
+注意：
+- 如果技能不涉及 API 呼叫（純文字技能），不需要填 api_config
+- credentials_service 應為簡短的英文代碼（如 erp, jira, weather）
 
 請使用 convert_skill 工具輸出結果。`;
 
@@ -185,11 +244,11 @@ export function isCatalogBrowseIntent(text: string): boolean {
 /**
  * 從 GitHub URL 匯入技能。
  *
- * 流程：
+ * Phase 2 流程：
  * 1. 解析 GitHub URL
  * 2. Fetch SKILL.md 內容
  * 3. 解析 YAML frontmatter + Markdown body
- * 4. AI 轉換為 MyClaw 格式
+ * 4. AI 轉換為 MyClaw 格式（含 api_config 提取）
  * 5. 安全檢查
  * 6. 回傳結果（不自動儲存，由呼叫端決定是否儲存）
  */
@@ -208,7 +267,7 @@ export async function importSkillFromURL(
     const { name, description, instructions } =
       parseSkillMd(skillContent);
 
-    // Step 4: AI 轉換為 MyClaw 格式
+    // Step 4: AI 轉換為 MyClaw 格式（含 api_config）
     const converted = await convertToMyClawFormat(
       name,
       description,
@@ -227,6 +286,12 @@ export async function importSkillFromURL(
       },
       warnings: safety.warnings,
     };
+
+    if (converted.api_config) {
+      console.log(
+        `[skill-importer] 成功提取 api_config: base_url=${converted.api_config.base_url}, auth=${converted.api_config.auth.type}`
+      );
+    }
 
     return result;
   } catch (error) {
@@ -302,11 +367,6 @@ export function formatCatalogList(
 
 /**
  * 解析 GitHub URL 為 owner/repo/branch/path 結構。
- *
- * 支援格式：
- * - https://github.com/owner/repo/tree/branch/path
- * - https://github.com/owner/repo/blob/branch/path/SKILL.md
- * - https://github.com/owner/repo (預設 main branch)
  */
 function parseGitHubUrl(url: string): {
   owner: string;
@@ -322,7 +382,6 @@ function parseGitHubUrl(url: string): {
   );
   if (fullMatch) {
     let path = fullMatch[4];
-    // 如果 path 直接指向 SKILL.md，取其目錄
     if (path.endsWith('/SKILL.md') || path.endsWith('/skill.md')) {
       path = path.replace(/\/SKILL\.md$/i, '');
     }
@@ -352,7 +411,6 @@ function parseGitHubUrl(url: string): {
 
 /**
  * 從 GitHub 取得 SKILL.md 的內容。
- * 使用 raw.githubusercontent.com 直接取得檔案。
  */
 async function fetchSkillContent(parsed: {
   owner: string;
@@ -362,7 +420,6 @@ async function fetchSkillContent(parsed: {
 }): Promise<string> {
   const { owner, repo, branch, path } = parsed;
 
-  // 嘗試多種可能的檔案位置
   const candidates = path
     ? [
         `${path}/SKILL.md`,
@@ -391,7 +448,6 @@ async function fetchSkillContent(parsed: {
 
 /**
  * 解析 SKILL.md 的 YAML frontmatter 和 Markdown body。
- * 使用 gray-matter 套件。
  */
 function parseSkillMd(content: string): {
   name: string;
@@ -412,7 +468,6 @@ function parseSkillMd(content: string): {
 
     return { name, description, instructions };
   } catch (error) {
-    // 如果 gray-matter 解析失敗，嘗試純文字解析
     if (error instanceof Error && error.message.includes('SKILL.md')) {
       throw error;
     }
@@ -436,6 +491,11 @@ function extractTitleFromMarkdown(content: string): string {
 
 /**
  * 使用 AI 將外部 Skill 格式轉換為 MyClaw JSON 格式。
+ *
+ * Agent Skills 架構：
+ * - AI 只提取名稱、描述、觸發方式、API 連線設定
+ * - prompt 保留 SKILL.md 的完整原始內容（AI 執行時需要閱讀 API 文件）
+ * - 不提取端點清單（AI 執行時自行從 prompt 中讀取）
  */
 async function convertToMyClawFormat(
   name: string,
@@ -468,20 +528,30 @@ ${instructions}`;
         name: string;
         description: string;
         trigger: { type: string; value: string };
-        prompt: string;
-        tools?: string[];
+        api_config?: ApiConfig;
       };
 
-      return {
+      const result: SkillCreateRequest = {
         name: input.name,
         description: input.description || '',
         trigger: {
           type: input.trigger.type as SkillCreateRequest['trigger']['type'],
           value: input.trigger.value || '',
         },
-        prompt: input.prompt,
-        tools: input.tools,
+        // 保留 SKILL.md 的完整原始內容作為 prompt
+        // AI 執行技能時需要閱讀這些 API 文件來決定呼叫哪個端點
+        prompt: instructions,
       };
+
+      // 提取 api_config（僅連線設定）
+      if (input.api_config && input.api_config.base_url && input.api_config.auth) {
+        result.api_config = input.api_config;
+        console.log(
+          `[skill-importer] AI 提取到 api_config: base_url=${input.api_config.base_url}, auth=${input.api_config.auth.type}`
+        );
+      }
+
+      return result;
     }
 
     // 如果 AI 沒有使用 tool，用降級方案
@@ -489,23 +559,21 @@ ${instructions}`;
       name: name,
       description: description || `匯入自 GitHub 的技能：${name}`,
       trigger: { type: 'manual', value: '' },
-      prompt: instructions.substring(0, 5000),
+      prompt: instructions,
     };
   } catch (error) {
     console.error('[skill-importer] AI 格式轉換失敗:', error);
-    // 降級方案：直接使用原始資料
     return {
       name,
       description: description || `匯入自 GitHub 的技能：${name}`,
       trigger: { type: 'manual', value: '' },
-      prompt: instructions.substring(0, 5000),
+      prompt: instructions,
     };
   }
 }
 
 /**
  * 驗證技能 prompt 的安全性。
- * 掃描 prompt injection 模式和長度限制。
  */
 function validateSkillSafety(prompt: string): {
   safe: boolean;
@@ -513,21 +581,18 @@ function validateSkillSafety(prompt: string): {
 } {
   const warnings: string[] = [];
 
-  // 檢查 prompt injection 模式
   for (const pattern of DANGEROUS_PATTERNS) {
     if (pattern.test(prompt)) {
       warnings.push(`偵測到可疑指令模式: ${pattern.source}`);
     }
   }
 
-  // 檢查 prompt 長度
-  if (prompt.length > 5000) {
+  if (prompt.length > MAX_PROMPT_LENGTH) {
     warnings.push(
-      `Prompt 長度 (${prompt.length}) 超過 5000 字元限制，將被截斷`
+      `Prompt 長度 (${prompt.length}) 超過 ${MAX_PROMPT_LENGTH} 字元限制，將被截斷`
     );
   }
 
-  // 檢查是否包含程式碼區塊（可能是可執行程式碼）
   const codeBlockCount = (prompt.match(/```/g) || []).length;
   if (codeBlockCount >= 4) {
     warnings.push('Prompt 包含大量程式碼區塊，請確認內容安全');
