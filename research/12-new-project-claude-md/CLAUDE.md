@@ -9,10 +9,15 @@
 ## 架構
 
 ```
-LINE ─→ Express.js (Webhook) ─→ Groq API (Qwen3 32B, 免費主力)
-                                 ↘ Claude API (複雜任務 fallback)
+LINE ─→ Express.js (Webhook) ─→ LLM Provider (自動偵測模式)
+                                 ├── Claude-only：只有 ANTHROPIC_API_KEY
+                                 │    └── 80% Haiku 4.5 + 20% Sonnet 4.5
+                                 ├── Groq-only：只有 GROQ_API_KEY
+                                 │    └── Qwen3 32B (免費)
+                                 └── 混合模式：兩者皆有
+                                      └── 簡單→Groq, 複雜→Claude
 SQLite (better-sqlite3) + node-cron
-~800 行代碼，8 個源碼檔案
+~800 行代碼，9 個源碼檔案
 ```
 
 ## 目錄結構
@@ -21,10 +26,11 @@ SQLite (better-sqlite3) + node-cron
 src/
 ├── index.ts              # Express 伺服器 + LINE Webhook 處理
 ├── config.ts             # 環境變數 + 常數
-├── llm.ts                # Groq API + Claude fallback 整合
+├── llm.ts                # LLM Provider Pattern (Claude-only / Groq-only / 混合)
 ├── db.ts                 # SQLite schema + CRUD 操作
 ├── memory.ts             # 使用者記憶系統 (讀/寫/更新)
 ├── skill-manager.ts      # 技能建立 + 管理 (自然語言 → JSON)
+├── skill-importer.ts     # GitHub URL 匯入 + 公開技能目錄瀏覽
 ├── skill-executor.ts     # 技能觸發判斷 + 執行
 └── scheduler.ts          # node-cron 排程任務
 ```
@@ -35,10 +41,11 @@ src/
 |------|------|------|
 | `index.ts` | HTTP 伺服器、LINE Webhook 接收與回覆、訊息路由 | config, llm, db, skill-executor |
 | `config.ts` | `process.env` 讀取、常數定義、型別匯出 | 無 |
-| `llm.ts` | Groq/Claude API 呼叫、Tool Calling 處理、錯誤重試 | config |
+| `llm.ts` | Provider Pattern：自動偵測 API Key 決定模式、Tool Calling、Structured Output、錯誤重試 | config |
 | `db.ts` | SQLite 初始化、表建立、users/skills/messages CRUD | config |
 | `memory.ts` | 使用者記憶的 Markdown 格式管理、上下文注入 | db |
 | `skill-manager.ts` | 解析自然語言意圖、生成技能 JSON、CRUD 技能 | llm, db |
+| `skill-importer.ts` | 解析 GitHub URL、fetch SKILL.md、AI 格式轉換、安全檢查、技能目錄瀏覽 | llm, db, skill-manager |
 | `skill-executor.ts` | 關鍵字/模式/cron 觸發判斷、執行技能 prompt | llm, db, memory |
 | `scheduler.ts` | node-cron 排程、定時技能觸發、任務日誌 | db, skill-executor |
 
@@ -49,8 +56,9 @@ src/
 | Runtime | Node.js | 20+ |
 | HTTP | Express.js | 4.x |
 | LINE SDK | @line/bot-sdk | 最新 |
-| AI (主力) | Groq API (Qwen3 32B) | - |
-| AI (fallback) | Claude API | - |
+| AI (模式A) | Groq API (Qwen3 32B) | 免費主力 |
+| AI (模式B) | Claude API (Haiku 4.5 + Sonnet 4.5) | 付費但品質更優 |
+| AI (模式C) | 混合模式 (Groq + Claude) | 最佳 CP 值 |
 | 資料庫 | better-sqlite3 | 最新 |
 | 排程 | node-cron | 最新 |
 | 語言 | TypeScript | 5.x |
@@ -61,10 +69,16 @@ src/
 # 必要
 LINE_CHANNEL_ACCESS_TOKEN=   # LINE Messaging API token
 LINE_CHANNEL_SECRET=         # LINE channel secret
-GROQ_API_KEY=                # Groq API key (免費)
+
+# AI API Key（至少填一個）
+ANTHROPIC_API_KEY=           # Claude API — 填此 key 即啟用 Claude-only 或混合模式
+GROQ_API_KEY=                # Groq API (免費) — 填此 key 即啟用 Groq-only 或混合模式
+# 兩個都填 → 混合模式（簡單→Groq, 複雜→Claude）
+# 都不填 → 啟動失敗
 
 # 選填
-ANTHROPIC_API_KEY=           # Claude API (fallback)
+CLAUDE_DEFAULT_MODEL=claude-haiku-4-5-20250501    # Claude-only 主力模型
+CLAUDE_COMPLEX_MODEL=claude-sonnet-4-5-20250514   # Claude-only 複雜任務模型
 PORT=3000                    # HTTP port
 NODE_ENV=development         # development | production
 ```
@@ -112,8 +126,17 @@ npm start            # 生產模式 (node dist/)
 users (id, line_user_id, display_name, memory_md, created_at, updated_at)
 
 -- 技能
-skills (id, user_id, name, trigger_type, trigger_value, prompt, enabled, created_at)
-  -- trigger_type: 'keyword' | 'pattern' | 'cron' | 'manual'
+skills (
+  id, user_id, name, description,
+  trigger_type,    -- 'keyword' | 'pattern' | 'cron' | 'manual' | 'always'
+  trigger_value,
+  prompt,
+  tools,           -- JSON array: 技能可使用的內建工具 ["web_search", "get_weather", ...]
+  enabled,
+  source_type,     -- 'user_created' | 'github_import' | 'catalog' | 'shared'
+  source_url,      -- 匯入來源 URL（追溯用）
+  created_at
+)
 
 -- 對話紀錄
 messages (id, user_id, role, content, created_at)
@@ -122,13 +145,63 @@ messages (id, user_id, role, content, created_at)
 scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, enabled)
 ```
 
-## Groq API 使用要點
+## LLM Provider 使用要點
 
-- Model ID: `qwen/qwen3-32b`
+### Groq API (Groq-only / 混合模式)
+
+- Model ID: `qwen/qwen3-32b`（通用）、`qwen-qwq-32b`（推理）
 - 使用 OpenAI 兼容格式 (openai SDK 或 fetch)
 - Tool Calling 用於技能建立 (function schema 強制 JSON 格式)
 - 免費額度：RPM 30, RPD 14400
 - 加 `/no_think` 到 user prompt 可關閉思考模式以加速回應
+- ⚠️ JSON 輸出可靠性問題：thinking mode 關閉時可能產生無效 JSON，需實作 retry
+
+### Claude API (Claude-only / 混合模式)
+
+- 主力模型：`claude-haiku-4-5-20250501`（快速便宜，~101 TPS）
+- 複雜任務：`claude-sonnet-4-5-20250514`（品質最佳）
+- 使用 `@anthropic-ai/sdk`
+- Structured Output：原生 JSON Schema 支援，穩定可靠
+- Tool Calling：業界頂級，參數提取精確
+- Prompt Caching：啟用可節省 50-80% input 費用（system prompt + 歷史對話快取）
+- Rate Limit：Tier 1 ($5 儲值) 即有 50 RPM，個人使用綽綽有餘
+- 建議設定 `max_tokens: 1024` 避免冗長回覆
+- 回應速度比 Groq 慢 3-5 倍，超過 5 秒的任務建議先回「思考中...」
+
+### Provider 自動偵測邏輯
+
+```
+啟動時檢查環境變數：
+├── 只有 ANTHROPIC_API_KEY    → claude-only 模式
+├── 只有 GROQ_API_KEY         → groq-only 模式
+├── 兩者皆有                   → hybrid 混合模式
+└── 都沒有                     → 啟動失敗，提示使用者
+```
+
+## Skill 匯入要點
+
+### GitHub URL 匯入流程
+
+1. 用戶在 LINE 傳送 GitHub URL + 安裝意圖
+2. 解析 URL → fetch `SKILL.md`（raw.githubusercontent.com）
+3. 解析 YAML frontmatter + Markdown body
+4. AI 轉換為 MyClaw JSON 格式（判斷觸發類型、翻譯中文、提取 prompt）
+5. 安全檢查（prompt 注入模式掃描、長度限制）
+6. 用戶預覽確認後儲存
+
+### 支援的外部格式
+
+- Anthropic Agent Skills (SKILL.md + YAML frontmatter) — 5,700+ 社群 skills
+- OpenAI Codex Skills (相同 SKILL.md 格式)
+- MyClaw 原生 JSON (skill.json)
+
+### 安全原則
+
+- Skills 是「prompt-only」設計，不執行任何外部程式碼
+- 匯入時掃描危險關鍵字（prompt injection 模式）
+- System Prompt 優先權保護（系統指令 > 技能 prompt > 用戶輸入）
+- 限制 prompt 長度上限（5000 字元）
+- 保留 source URL 供追溯
 
 ## LINE Webhook 要點
 
@@ -136,3 +209,4 @@ scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, ena
 - Reply Token 只能用一次且有時效
 - Reply Message 免費，Push Message 有限額
 - Webhook 須回應 HTTP 200，處理邏輯異步進行
+- Claude-only 模式下回應較慢，建議實作「處理中...」即時回覆 + Push Message 發送結果

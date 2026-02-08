@@ -24,7 +24,8 @@ LINE ─→ Node.js (Express) ─→ Groq API (Qwen3 32B, 免費)
 | HTTP | Express.js | 輕量穩定 |
 | LINE | @line/bot-sdk | 官方 SDK |
 | **AI (主力)** | **Groq API — Qwen3 32B** | **免費、中文優秀、Tool Calling 頂級** |
-| AI (fallback) | Claude API | 複雜任務 |
+| AI (fallback) | Claude API (Haiku 4.5) | 複雜任務 |
+| **AI (替代)** | **Claude-only 模式** | **用戶可選擇只用 Claude API（$1-25/月）** |
 | 資料庫 | SQLite (better-sqlite3) | 零配置 |
 | 排程 | node-cron | 輕量 |
 | 容器化 | Docker + Docker Compose | 一鍵啟動、環境一致 |
@@ -109,6 +110,45 @@ LINE ─→ Node.js (Express) ─→ Groq API (Qwen3 32B, 免費)
 - ❌ **`npm install -g` 不推薦**: 伺服器不適合全域安裝
 - **無法自動化的步驟**: LINE 帳號設定 (~10 分鐘)，使用者必須手動完成
 
+### Round 4 研究（2026-02-08）
+
+#### 13a. 僅使用 Claude API 可行性 (`13-claude-only-feasibility/`)
+- ✅ **完全可行，品質更優**：Claude API 在 tool calling、structured output、繁體中文方面均優於 Groq + Qwen3 32B
+- **成本估算**：使用 Claude Haiku 4.5 作為主力
+  - 輕度 50 對話/天：**~$1-3/月**
+  - 中度 200 對話/天：**~$5-12/月**
+  - 重度 500 對話/天：**~$12-25/月**
+- **效能差異**：比 Groq 慢 3-5 倍（~3-5 秒回覆），但 LINE 聊天場景可接受
+- **架構建議**：`llm.ts` 採用 Provider Pattern，自動偵測 API Key：
+  - 只有 `ANTHROPIC_API_KEY` → Claude-only 模式（80% Haiku + 20% Sonnet）
+  - 只有 `GROQ_API_KEY` → Groq-only 模式
+  - 兩者皆有 → 混合模式
+  - 都沒有 → 啟動失敗
+- **結論**：用戶只填 Claude API Key 完全可行，不需要 Groq API
+
+#### 13b. Claude Pro/Max Plan 接入可行性 (`13-claude-pro-max-vs-api/`)
+- ❌ **不可行**：Claude Pro/Max 訂閱和 Claude API 是完全獨立的產品線
+- **關鍵事實**：
+  - Anthropic 官方明確聲明：訂閱方案不包含 API 存取權限
+  - 2026 年 1 月 9 日 Anthropic 實施伺服器端技術封鎖，阻止第三方工具透過訂閱 OAuth token 存取
+  - 使用條款明確禁止透過 bot/script 方式使用訂閱服務
+- **MCP 也無法解決**：MCP 只能讓 Claude「發送」LINE 訊息，無法「接收並自動回應」LINE 用戶訊息
+- **對 MyClaw 影響**：無需改動架構，用戶需使用 API 按量計費（Groq 免費 + Claude API $0-3/月）
+- **用戶溝通建議**：向用戶解釋訂閱和 API 的區別，強調 MyClaw 主要用免費 Groq，Claude API 月費極低
+
+#### 13c. 接入公開 Skills 可行性 (`13-public-skill-import/`)
+- ✅ **可行，需格式轉換**：AI 生態系已有大量公開 skills（Anthropic Agent Skills 5,700+、OpenAI Codex Skills 等）
+- ✅ **GitHub URL 匯入機制完全可行**：用戶貼上 URL → AI fetch SKILL.md → 解析轉換為 MyClaw JSON → 用戶確認後儲存
+- **安全優勢**：MyClaw 的 skill 是「prompt-only」設計（純 JSON + prompt），天然免疫程式碼執行攻擊
+- **MVP 實現方案**（約 100-150 行新程式碼）：
+  1. 建立 `myclaw/skill-catalog` GitHub repo（10 個預設 skills）
+  2. GitHub URL 匯入功能（URL 解析 → fetch → AI 轉換 → 儲存）
+  3. 「瀏覽技能」指令（讀取 catalog.json 列表展示）
+- **分階段實施**：
+  - MVP：GitHub repo + URL 匯入 + 瀏覽指令
+  - V2：LINE 內建技能商店 UI + 用戶間分享
+  - V3：選擇性 MCP 橋接（進階用戶）
+
 ---
 
 ## 確認的安裝策略
@@ -163,6 +203,9 @@ research/
 ├── 08-qwen3-skill-capability/           # Qwen3 技能能力
 ├── 09-codespace-docker-testing/         # Codespace + Docker
 ├── 10-one-click-install/                # 一鍵安裝方案
+├── 13-claude-only-feasibility/          # Claude-only API 可行性分析
+├── 13-claude-pro-max-vs-api/            # Claude Pro/Max vs API 研究
+├── 13-public-skill-import/              # 公開 Skills 導入機制研究
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```
