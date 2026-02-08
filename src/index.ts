@@ -2,6 +2,7 @@
 // Express 伺服器 + LINE Webhook 處理
 // ============================================
 
+import 'dotenv/config';
 import express from 'express';
 import {
   middleware,
