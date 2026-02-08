@@ -182,6 +182,52 @@ LINE ─→ Node.js (Express) ─→ Groq API (Qwen3 32B, 免費)
   - Phase 3：LINE 動態切換 + DB 儲存用戶偏好
 - **重要發現**：不同 Groq 模型需要不同前處理（Qwen3 需要 `/no_think`，其他模型不需要），需在模型註冊表中標記
 
+### Round 6 研究（2026-02-08）
+
+#### 15a. Kimi K2 技能執行能力問題 (`15-kimi-k2-skill-execution/`)
+- ⚠️ **Kimi K2 在 Groq 上的 Tool Calling 不穩定，是技能無法正確操作的主因**
+- **問題現象**：AI 可以正確回答「有什麼 skills」（走關鍵字匹配，不需 LLM），但無法正確建立/執行 skill
+- **根因分析**（按影響程度排序）：
+  1. **Tool Calling 失敗率 ~5-10%**：Groq Community 多篇報告顯示 Kimi K2 的 tool call 會出現格式錯誤、驗證失敗、通用失敗等問題
+  2. **Tool Call ID 格式不兼容**：Kimi K2 期望 `functions.{func_name}:{idx}` 格式，但 Groq 可能不產生此格式
+  3. **嵌套 JSON Schema 解析問題**：`create_skill` 工具的 trigger 子物件可能被解析為不完整或畸形 JSON
+  4. **觸發條件建立不精確**：即使 Tool Calling 成功，trigger_value 可能與預期不符
+  5. **System Prompt 遵循能力影響最小**：Kimi K2 的中文文字生成能力仍然優秀
+- **關鍵發現**：不同 Provider 的 Kimi K2 表現差異顯著
+  - Moonshot AI（官方）：Tool Calling 100% 可靠，但速度最慢（~10 TPS）
+  - Groq：速度最快（170-230 TPS），但 Tool Calling 有問題
+  - DeepInfra：品質最高，速度中等
+- **建議解決方案**：
+  1. **立即**：`parseSkillFromText()` 增加 Tool Calling 重試邏輯（方案 A）
+  2. **短期**：改用 Prompt-based JSON 取代 Tool Calling（方案 B，最推薦）
+  3. **中期**：混合策略 — 技能建立用 prompt-based JSON，其他操作用 Kimi K2 文字生成（方案 E）
+- **結論**：「列出技能」不需 LLM 所以 100% 正常；「建立/執行技能」依賴 LLM 的 Tool Calling 和結構化輸出，受 Kimi K2 在 Groq 上的限制影響
+
+#### 15b. Claude Code Agent Skills vs MyClaw 技能系統對比 (`15-claude-skills-vs-myclaw/`)
+- ✅ **完成深度對比分析**：兩個系統定位截然不同
+- **Claude Code Agent Skills 機制**：
+  - `.claude/skills/` 資料夾儲存，SKILL.md + YAML frontmatter 格式
+  - 三層漸進式載入：metadata（常駐）→ instructions（觸發時）→ resources（按需）
+  - AI 語義觸發 + 使用者 `/command` 手動觸發
+  - 開放標準 agentskills.io，社群 65.6k stars
+  - 支援子代理 fork、動態 shell 命令、變數替換
+- **MyClaw 技能系統**：
+  - SQLite 資料庫儲存，JSON 格式
+  - 自然語言 → LLM Tool Calling → 結構化技能配置
+  - keyword/pattern/cron/always 規則觸發
+  - Prompt-only 設計，天然免疫程式碼注入
+  - GitHub URL 匯入，相容 Agent Skills 格式
+- **MyClaw 獨特優勢**：
+  1. 零門檻技能建立（自然語言對話）
+  2. Cron 排程觸發（Claude Code 不具備）
+  3. 個人化記憶整合（memory_md）
+  4. LINE 對話即介面
+  5. Prompt-only 安全模型
+- **可借鏡的設計**：
+  1. 漸進式載入（只預載 description，觸發時才載入完整 prompt）
+  2. 語義 fallback 觸發（keyword/pattern 失敗時用 AI 判斷）
+  3. 變數替換（{user_message}、{user_name}、{current_time}）
+
 ---
 
 ## 確認的安裝策略
@@ -241,6 +287,8 @@ research/
 ├── 13-public-skill-import/              # 公開 Skills 導入機制研究
 ├── 14-gpt-oss-120b-model-switch/        # GPT-OSS-120B 替換可行性研究
 ├── 14-user-model-selection/             # 模型用戶自選機制研究
+├── 15-kimi-k2-skill-execution/          # Kimi K2 技能執行能力研究
+├── 15-claude-skills-vs-myclaw/          # Claude Code Skills vs MyClaw 對比研究
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```
