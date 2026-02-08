@@ -55,14 +55,20 @@ export function loadConfig(): AppConfig {
       ...(anthropicKey && {
         claude: {
           apiKey: anthropicKey,
-          defaultModel: process.env.CLAUDE_DEFAULT_MODEL || 'claude-haiku-4-5-20250501',
-          complexModel: process.env.CLAUDE_COMPLEX_MODEL || 'claude-sonnet-4-5-20250514',
+          defaultModel: validateClaudeModel(
+            process.env.CLAUDE_DEFAULT_MODEL || CLAUDE_DEFAULT_DEFAULT_MODEL,
+            CLAUDE_DEFAULT_DEFAULT_MODEL,
+          ),
+          complexModel: validateClaudeModel(
+            process.env.CLAUDE_COMPLEX_MODEL || CLAUDE_DEFAULT_COMPLEX_MODEL,
+            CLAUDE_DEFAULT_COMPLEX_MODEL,
+          ),
         },
       }),
       ...(groqKey && {
         groq: {
           apiKey: groqKey,
-          model: 'qwen/qwen3-32b',
+          model: validateGroqModel(process.env.GROQ_MODEL || GROQ_DEFAULT_MODEL),
         },
       }),
     },
@@ -186,6 +192,164 @@ export interface SkillImportResult {
     originalFormat: string;
   };
   warnings: string[];
+}
+
+// ============================================
+// 模型註冊表（白名單 + 特性標記）
+// ============================================
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  provider: 'groq' | 'claude';
+  toolCalling: boolean;
+  /** 需要在 user prompt 結尾附加 /no_think 加速回應（Qwen3 系列） */
+  needsNoThink: boolean;
+  /** 回應可能包含 <think> 標籤需要清理（Qwen3 系列） */
+  needsThinkCleanup: boolean;
+  note: string;
+}
+
+export const GROQ_MODEL_REGISTRY: Record<string, ModelInfo> = {
+  'qwen/qwen3-32b': {
+    id: 'qwen/qwen3-32b',
+    name: 'Qwen3 32B',
+    provider: 'groq',
+    toolCalling: true,
+    needsNoThink: true,
+    needsThinkCleanup: true,
+    note: '免費主力，中文優秀，JSON 輸出偶有問題',
+  },
+  'qwen-qwq-32b': {
+    id: 'qwen-qwq-32b',
+    name: 'QwQ 32B (推理)',
+    provider: 'groq',
+    toolCalling: true,
+    needsNoThink: true,
+    needsThinkCleanup: true,
+    note: '推理型模型，適合複雜任務',
+  },
+  'moonshotai/kimi-k2-instruct-0905': {
+    id: 'moonshotai/kimi-k2-instruct-0905',
+    name: 'Kimi K2',
+    provider: 'groq',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: 'Tool Calling ~95% 成功率，中英雙語優秀，速度較慢',
+  },
+  'meta-llama/llama-4-scout-17b-16e-instruct': {
+    id: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    name: 'Llama 4 Scout',
+    provider: 'groq',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: 'Meta Llama 4，TPD 500K，中文能力一般',
+  },
+  'meta-llama/llama-3.3-70b-versatile': {
+    id: 'meta-llama/llama-3.3-70b-versatile',
+    name: 'Llama 3.3 70B',
+    provider: 'groq',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: 'Llama 3.3，穩定可靠',
+  },
+  'openai/gpt-oss-120b': {
+    id: 'openai/gpt-oss-120b',
+    name: 'GPT-OSS 120B',
+    provider: 'groq',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '中文能力極差，不建議用於中文場景',
+  },
+  'mistralai/mistral-saba-24b': {
+    id: 'mistralai/mistral-saba-24b',
+    name: 'Mistral Saba 24B',
+    provider: 'groq',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: 'Mistral 輕量模型',
+  },
+};
+
+export const CLAUDE_MODEL_REGISTRY: Record<string, ModelInfo> = {
+  'claude-haiku-4-5-20250501': {
+    id: 'claude-haiku-4-5-20250501',
+    name: 'Claude Haiku 4.5',
+    provider: 'claude',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '快速便宜，~101 TPS',
+  },
+  'claude-sonnet-4-5-20250514': {
+    id: 'claude-sonnet-4-5-20250514',
+    name: 'Claude Sonnet 4.5',
+    provider: 'claude',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '均衡首選，品質優秀',
+  },
+  'claude-sonnet-4-20250514': {
+    id: 'claude-sonnet-4-20250514',
+    name: 'Claude Sonnet 4',
+    provider: 'claude',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '均衡穩定',
+  },
+  'claude-haiku-3-5-20241022': {
+    id: 'claude-haiku-3-5-20241022',
+    name: 'Claude Haiku 3.5',
+    provider: 'claude',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '最便宜，$0.80/MTok input',
+  },
+};
+
+const GROQ_DEFAULT_MODEL = 'qwen/qwen3-32b';
+const CLAUDE_DEFAULT_DEFAULT_MODEL = 'claude-haiku-4-5-20250501';
+const CLAUDE_DEFAULT_COMPLEX_MODEL = 'claude-sonnet-4-5-20250514';
+
+/**
+ * 驗證 Groq 模型是否在白名單中，回傳驗證後的 model ID
+ */
+function validateGroqModel(model: string): string {
+  if (GROQ_MODEL_REGISTRY[model]) {
+    return model;
+  }
+  const available = Object.keys(GROQ_MODEL_REGISTRY).join(', ');
+  console.warn(`[config] GROQ_MODEL "${model}" 不在白名單中，改用預設 ${GROQ_DEFAULT_MODEL}`);
+  console.warn(`[config] 可用的 Groq 模型: ${available}`);
+  return GROQ_DEFAULT_MODEL;
+}
+
+/**
+ * 驗證 Claude 模型是否在白名單中
+ */
+function validateClaudeModel(model: string, fallback: string): string {
+  if (CLAUDE_MODEL_REGISTRY[model]) {
+    return model;
+  }
+  const available = Object.keys(CLAUDE_MODEL_REGISTRY).join(', ');
+  console.warn(`[config] Claude 模型 "${model}" 不在白名單中，改用預設 ${fallback}`);
+  console.warn(`[config] 可用的 Claude 模型: ${available}`);
+  return fallback;
+}
+
+/**
+ * 根據模型 ID 取得模型資訊
+ */
+export function getModelInfo(modelId: string): ModelInfo | undefined {
+  return GROQ_MODEL_REGISTRY[modelId] || CLAUDE_MODEL_REGISTRY[modelId];
 }
 
 // ============================================

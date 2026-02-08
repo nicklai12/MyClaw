@@ -149,6 +149,39 @@ LINE ─→ Node.js (Express) ─→ Groq API (Qwen3 32B, 免費)
   - V2：LINE 內建技能商店 UI + 用戶間分享
   - V3：選擇性 MCP 橋接（進階用戶）
 
+### Round 5 研究（2026-02-08）
+
+#### 14a. GPT-OSS-120B 替換 Qwen3 32B 可行性 (`14-gpt-oss-120b-model-switch/`)
+- ❌ **不建議切換到 openai/gpt-oss-120b**，三個致命缺陷：
+  1. 繁體中文能力極差（C-Eval 僅 20%，遠低於 Qwen3）
+  2. Groq 社群回報 Tool Calling 可靠性問題（模型會忽略 tool 定義）
+  3. Structured Outputs 與 Tool Use 不能同時使用
+- **最佳替代方案：Kimi K2-0905**（`moonshotai/kimi-k2-instruct-0905`）
+  - Tool Calling ~95% 首次成功率、繁中能力優秀、支援 Parallel Tool Calling
+  - 缺點：速度較慢（200 TPS vs Qwen3 的 662 TPS）、免費 TPD 只有 300K
+- **建議策略**：
+  - 短期：保留 Qwen3 32B，加強 JSON 驗證和 fallback 解析邏輯
+  - 中期：新增 Kimi K2-0905 作為 skill parsing 專用模型
+- **Groq 免費模型 Tool Calling 比較**：
+  | 模型 | RPM | TPD | Tool Calling | 繁中 |
+  |------|-----|-----|-------------|------|
+  | Qwen3 32B | 60 | 500K | 良好 | 優秀 |
+  | Kimi K2-0905 | 60 | 300K | 優秀(~95%) | 優秀 |
+  | GPT-OSS-120B | 30 | 200K | 不穩定 | 極差 |
+  | Llama 4 Scout | 30 | 500K | 良好 | 一般 |
+
+#### 14b. 模型用戶自選機制 (`14-user-model-selection/`)
+- ✅ **可以且應該支援模型選填**
+- **MVP 推薦：方案 A 增強版（.env 配置 + 模型白名單）**
+  - `config.ts` 讀取 `GROQ_MODEL` / `CLAUDE_DEFAULT_MODEL` 環境變數
+  - 建立支援 Tool Calling 的模型白名單驗證
+  - 改動量極小（~60 行），不需 DB 變更
+- **後續迭代路線**：
+  - Phase 1 (MVP)：.env 配置模型選擇
+  - Phase 2：LINE 中查詢可用模型資訊
+  - Phase 3：LINE 動態切換 + DB 儲存用戶偏好
+- **重要發現**：不同 Groq 模型需要不同前處理（Qwen3 需要 `/no_think`，其他模型不需要），需在模型註冊表中標記
+
 ---
 
 ## 確認的安裝策略
@@ -206,6 +239,8 @@ research/
 ├── 13-claude-only-feasibility/          # Claude-only API 可行性分析
 ├── 13-claude-pro-max-vs-api/            # Claude Pro/Max vs API 研究
 ├── 13-public-skill-import/              # 公開 Skills 導入機制研究
+├── 14-gpt-oss-120b-model-switch/        # GPT-OSS-120B 替換可行性研究
+├── 14-user-model-selection/             # 模型用戶自選機制研究
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```

@@ -15,6 +15,7 @@ import {
   ToolCall,
   Complexity,
   MAX_TOKENS_DEFAULT,
+  getModelInfo,
 } from './config';
 
 // ============================================
@@ -270,9 +271,8 @@ function convertToolToAnthropic(tool: ToolDefinition): Anthropic.Tool {
 
 /**
  * 使用 Groq API（OpenAI 相容格式）進行對話
- * - model: qwen/qwen3-32b
+ * - 根據模型註冊表決定前處理行為（/no_think、<think> 清理）
  * - Tool Calling 支援
- * - user prompt 結尾附加 /no_think 加速回應
  * - JSON 輸出有可靠性問題，需要基本驗證
  * - 錯誤處理 + 基本 retry（最多 2 次）
  */
@@ -283,6 +283,7 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
 
   const groqConfig = currentConfig.llm.groq;
   const model = groqConfig.model;
+  const modelInfo = getModelInfo(model);
   const maxTokens = options.maxTokens || MAX_TOKENS_DEFAULT;
 
   // 建構 OpenAI 格式 messages
@@ -298,14 +299,15 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
 
   // 對話歷史
   for (const msg of options.messages) {
-    // 最後一條 user message 附加 /no_think 加速回應
+    // 只有模型需要時才附加 /no_think（Qwen3 系列）
     const isLastUser =
       msg === options.messages[options.messages.length - 1] &&
       msg.role === 'user';
+    const shouldAppendNoThink = isLastUser && modelInfo?.needsNoThink;
 
     messages.push({
       role: msg.role,
-      content: isLastUser ? `${msg.content}\n/no_think` : msg.content,
+      content: shouldAppendNoThink ? `${msg.content}\n/no_think` : msg.content,
     });
   }
 
@@ -332,8 +334,10 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
 
       const rawContent = choice.message.content || '';
 
-      // 清理 Groq/Qwen 可能產生的 thinking tags
-      const content = cleanGroqContent(rawContent);
+      // 只有模型需要時才清理 thinking tags（Qwen3 系列）
+      const content = modelInfo?.needsThinkCleanup
+        ? cleanThinkingTags(rawContent)
+        : rawContent.trim();
 
       // 解析 tool calls
       const toolCalls: ToolCall[] = (choice.message.tool_calls || []).map(
@@ -402,11 +406,10 @@ function convertToolToOpenAI(
 }
 
 /**
- * 清理 Groq/Qwen 回應中可能出現的 thinking tags
+ * 清理 Qwen3 回應中可能出現的 thinking tags
  * Qwen3 有時會在 /no_think 模式下仍然產生 <think>...</think> 標籤
  */
-function cleanGroqContent(content: string): string {
-  // 移除 <think>...</think> 區塊（包含換行）
+function cleanThinkingTags(content: string): string {
   const cleaned = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
   return cleaned;
 }
