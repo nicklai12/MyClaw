@@ -1,25 +1,19 @@
 // ============================================
 // node-cron 排程系統
 // ============================================
-// 管理 cron 排程任務：定時觸發技能並透過 LINE Push Message 發送結果
+// 管理 cron 排程任務：定時觸發技能並透過對應平台發送結果
 
 import cron from 'node-cron';
-import { messagingApi } from '@line/bot-sdk';
 import { AppConfig, ScheduledTask } from './config';
 import { getActiveScheduledTasks, updateLastRun, getUserById, getEnabledSkills } from './db';
 import { executeSkill } from './skill-executor';
-
-// ============================================
-// LINE 訊息上限
-// ============================================
-
-const LINE_TEXT_MAX_LENGTH = 5000;
+import type { MessageChannel } from './channel';
 
 // ============================================
 // 模組狀態
 // ============================================
 
-let lineClient: messagingApi.MessagingApiClient | null = null;
+let channelList: MessageChannel[] = [];
 
 /** 以 taskId 為 key 的 cron job map */
 const cronJobs = new Map<number, cron.ScheduledTask>();
@@ -32,11 +26,8 @@ const cronJobs = new Map<number, cron.ScheduledTask>();
  * 初始化排程系統
  * 從 DB 讀取所有啟用的排程任務並建立 cron job
  */
-export function initScheduler(config: AppConfig): void {
-  // 初始化 LINE client（用於 Push Message）
-  lineClient = new messagingApi.MessagingApiClient({
-    channelAccessToken: config.line.channelAccessToken,
-  });
+export function initScheduler(_config: AppConfig, channels: MessageChannel[]): void {
+  channelList = channels;
 
   // 讀取所有啟用的排程任務
   try {
@@ -59,7 +50,7 @@ export function initScheduler(config: AppConfig): void {
 
 /**
  * 執行排程技能
- * 讀取 skill → 執行 → 用 LINE Push Message 發送結果 → 更新 last_run
+ * 讀取 skill → 執行 → 透過對應平台發送結果 → 更新 last_run
  */
 async function executeCronSkill(task: ScheduledTask): Promise<void> {
   console.log(`[scheduler] 執行排程任務: id=${task.id}, skill_id=${task.skill_id}`);
@@ -77,24 +68,25 @@ async function executeCronSkill(task: ScheduledTask): Promise<void> {
     // 執行技能（executeSkill 內部會讀取 memory 和呼叫 chat）
     const result = await executeSkill(skill, task.user_id, '');
 
-    // 透過 LINE Push Message 發送結果
-    if (lineClient) {
-      const user = getUserById(task.user_id);
-      if (user) {
-        const message: messagingApi.TextMessage = {
-          type: 'text',
-          text: truncateForLine(result),
-        };
+    // 找到使用者對應的 channel 並推送結果
+    const user = getUserById(task.user_id);
+    if (user) {
+      const platform = user.platform || 'line';
+      const platformUserId = user.platform_user_id || user.line_user_id;
+      const channel = channelList.find((ch) => ch.platform === platform);
 
+      if (channel) {
         try {
-          await lineClient.pushMessage({ to: user.line_user_id, messages: [message] });
-          console.log(`[scheduler] 排程結果已發送給用戶: ${user.line_user_id}`);
+          await channel.push(platformUserId, result);
+          console.log(`[scheduler] 排程結果已發送給用戶: ${platform}:${platformUserId}`);
         } catch (pushError) {
-          console.error('[scheduler] Push Message 失敗:', pushError);
+          console.error('[scheduler] Push 失敗:', pushError);
         }
       } else {
-        console.error(`[scheduler] 找不到使用者 (user_id=${task.user_id})`);
+        console.error(`[scheduler] 找不到平台 ${platform} 的 channel`);
       }
+    } else {
+      console.error(`[scheduler] 找不到使用者 (user_id=${task.user_id})`);
     }
 
     // 更新 last_run
@@ -144,18 +136,4 @@ export function removeCronJob(taskId: number): void {
     cronJobs.delete(taskId);
     console.log(`[scheduler] Cron job 已移除: id=${taskId}`);
   }
-}
-
-// ============================================
-// 工具函式
-// ============================================
-
-/**
- * 截斷訊息至 LINE 上限（5000 字元）
- */
-function truncateForLine(text: string): string {
-  if (text.length <= LINE_TEXT_MAX_LENGTH) {
-    return text;
-  }
-  return text.substring(0, LINE_TEXT_MAX_LENGTH - 20) + '\n...(訊息已截斷)';
 }

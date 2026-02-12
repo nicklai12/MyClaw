@@ -291,6 +291,8 @@ research/
 ├── 15-claude-skills-vs-myclaw/          # Claude Code Skills vs MyClaw 對比研究
 ├── 17-agent-skills-testing/             # Agent Skills 動態架構深度測試
 ├── 18-gemini-anti-fabrication/          # Gemini 模型防造假可行性研究
+├── 19-cerebras-cloud-models/            # Cerebras Cloud 免費模型研究
+├── 19-messaging-platform-comparison/    # LINE/Telegram/Discord 平台比較研究
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```
@@ -642,6 +644,108 @@ Phase 2 重構已完成，目前架構已經是動態的：
 
 ---
 
+### Round 10 研究（2026-02-12）— Cerebras Cloud + 平台比較
+
+#### 19a. Cerebras Cloud 免費模型研究 (`19-cerebras-cloud-models/`)
+
+**結論：推薦有條件整合，Cerebras 值得作為第三個免費 LLM 提供者。**
+
+##### 免費模型列表
+
+| 模型 | Model ID | 參數量 | 速度 | Context (Free) | RPD | 狀態 |
+|------|----------|--------|------|----------------|-----|------|
+| **gpt-oss-120b** | `gpt-oss-120b` | 120B MoE | ~3,000 tok/s | 131K | 14,400 | **Production ✅** |
+| **Qwen3 235B** | `qwen-3-235b-a22b-instruct-2507` | 235B MoE (22B active) | ~1,400 tok/s | 64K | 14,400 | Preview |
+| **GLM-4.7** | `zai-glm-4.7` | 358B MoE (32B active) | ~1,000 tok/s | 200K | **100** | Preview |
+| Qwen3 32B | `qwen-3-32b` | 32B | ~2,600 tok/s | 8K | 14,400 | **2026/02/16 停用** |
+| Llama 3.3 70B | `llama-3.3-70b` | 70B | ~2,100 tok/s | 8K | 14,400 | **2026/02/16 停用** |
+
+##### Tool Calling 評估
+
+- ✅ API 格式為 **OpenAI 相容**（與 Groq 相同模式，改 baseURL 即可）
+- ✅ 支援 **strict mode**（受限解碼，保證參數符合 JSON Schema）
+- ✅ 支援平行工具呼叫
+- GLM-4.7 在 BFCL (Berkeley Function Calling Leaderboard) **排名 #1**，tau2-Bench Telecom 96%
+- gpt-oss-120b 原生支援 function calling、structured output
+
+##### Tool Calling 可靠性比較
+
+| 模型 | 估計可靠性 | 說明 |
+|------|-----------|------|
+| Claude Sonnet 4.5 | ~99% | 業界頂級 |
+| **Cerebras GLM-4.7** | **~96-98%** | BFCL #1 + strict mode |
+| **Cerebras gpt-oss-120b** | **~93-97%** | 原生 function calling |
+| **Cerebras Qwen3 235B** | **~90-95%** | 參數量大，表現穩定 |
+| Groq Qwen3 32B | ~90-95% | 現有免費方案 |
+
+##### 防造假能力
+
+- GLM-4.7 支援 interleaved thinking + preserved thinking → 有助於呼叫工具前推理
+- gpt-oss-120b 支援 chain-of-thought + 可配置推理深度
+- strict mode 可確保工具參數正確，減少呼叫失敗
+- ⚠️ **GLM-4.7 免費方案 RPD 僅 100**，嚴重不適合日常使用
+
+##### 整合建議
+
+```
+推薦模型組合：
+├── 主力：gpt-oss-120b（Production、131K context、最快 3000 tok/s、RPD 14,400）
+├── 智能備用：qwen-3-235b（更大模型、64K context、支援推理模式）
+└── 特殊用途：zai-glm-4.7（工具呼叫最強、200K context、但 RPD 僅 100）
+
+LLM 三層架構：
+Layer 1: 免費快速 → Groq Qwen3 32B 或 Cerebras gpt-oss-120b
+Layer 2: 免費智能 → Cerebras Qwen3 235B 或 GLM-4.7（限量）
+Layer 3: 付費頂級 → Claude Haiku 4.5 / Sonnet 4.5
+```
+
+---
+
+#### 19b. LINE / Telegram / Discord 平台比較 (`19-messaging-platform-comparison/`)
+
+**結論：技術最佳 Telegram，市場最佳 LINE；建議 LINE 為主 + Telegram 為輔的雙平台策略。**
+
+##### 延遲回應處理能力比較
+
+| 特性 | LINE | Telegram | Discord |
+|------|------|----------|---------|
+| 「思考中」指示 | Loading Indicator (5-60秒) | sendChatAction (每5秒重發) | deferReply (原生) |
+| 原地更新結果 | ❌ 不支援 | ✅ editMessageText | ✅ editReply |
+| 串流輸出 | ❌ 不支援 | ✅ 可模擬 | ✅ 可模擬 |
+| 中間進度回饋 | ❌ 需發新訊息 | ✅ edit 同一訊息 | ✅ editReply |
+| 最大等待時間 | Loading 60秒 + Push | 無限 | 15 分鐘 |
+| 訊息費用 | Push 計費 (200則/月免費) | **完全免費** | **完全免費** |
+
+##### 綜合評分
+
+| 維度 | LINE | Telegram | Discord |
+|------|------|----------|---------|
+| 延遲回應 UX | 6/10 | **9/10** | 8/10 |
+| 中間狀態回饋 | 3/10 | **9/10** | 7/10 |
+| 串流輸出能力 | 1/10 | **8/10** | 7/10 |
+| 訊息成本 | 4/10 | **10/10** | **10/10** |
+| 台灣市場觸及 | **10/10** | 3/10 | 2/10 |
+| 個人助理 UX | **8/10** | 7/10 | 4/10 |
+| **總分** | **44/80** | **63/80** | **53/80** |
+
+##### 結論與建議
+
+- **Telegram 技術最優**：訊息可編輯、完全免費、可模擬串流、無 token 過期問題
+- **LINE 市場無可取代**：台灣 94% 滲透率、使用者無需安裝新 App
+- **Discord 不適合**：社群導向、非個人助理場景、Slash Command 非自然語言
+- **建議策略**：
+  - 短期：優化 LINE（善用 Loading Indicator API、Reply 優先、Push 節制）
+  - 中期：新增 Telegram 作為進階選項（開發測試 + 高頻使用者 + 串流輸出）
+  - 不建議：放棄 LINE、以 Discord 為主、同時維護三平台
+
+```
+MyClaw 架構擴充方向：
+├── LINE Channel   → 大眾使用者（簡單互動、觸及率優先）
+└── Telegram Channel → 進階使用者（串流輸出、進度回饋、無成本限制）
+```
+
+---
+
 ## 下一步（更新版）
 
 ### 已完成
@@ -655,9 +759,13 @@ Phase 2 重構已完成，目前架構已經是動態的：
 6. 端到端測試：匯入 ERP SKILL.md → 設定帳密 → 觸發查詢 → 確認回傳真實 API 資料
 7. 新增 Gemini Grounding provider（選填 `GEMINI_API_KEY`）
 8. 無 API 技能執行時自動啟用 Google Search Grounding fallback
+9. 🆕 整合 Cerebras Cloud 作為第三個免費 LLM 提供者（`CEREBRAS_API_KEY`，預設 gpt-oss-120b）
+10. 🆕 優化 LINE 延遲回應 UX（Loading Indicator API + Reply 優先策略）
 
 ### 中期
-9. 匯入預覽確認流程
-10. 安全檢查阻擋（safe=false 時拒絕匯入）
-11. 支援 Basic Auth
-12. Credential 加密儲存
+11. 匯入預覽確認流程
+12. 安全檢查阻擋（safe=false 時拒絕匯入）
+13. 支援 Basic Auth
+14. Credential 加密儲存
+15. 🆕 新增 Telegram Channel 支援（MessageChannel 抽象接口 + Telegram Bot API 整合）
+16. 🆕 Telegram 串流輸出（editMessageText 模擬逐字顯示）

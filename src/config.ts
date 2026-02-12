@@ -2,13 +2,18 @@
 // 環境變數與設定
 // ============================================
 
+export type PlatformType = 'line' | 'telegram';
+
 export interface AppConfig {
-  line: {
+  line?: {
     channelAccessToken: string;
     channelSecret: string;
   };
+  telegram?: {
+    botToken: string;
+  };
   llm: {
-    provider: 'claude-only' | 'groq-only' | 'hybrid';
+    provider: 'claude-only' | 'groq-only' | 'cerebras-only' | 'hybrid';
     claude?: {
       apiKey: string;
       defaultModel: string;
@@ -18,38 +23,63 @@ export interface AppConfig {
       apiKey: string;
       model: string;
     };
+    cerebras?: {
+      apiKey: string;
+      model: string;
+    };
   };
   port: number;
   nodeEnv: string;
+  webhookBaseUrl?: string;
 }
 
 export function loadConfig(): AppConfig {
+  // 平台設定：至少需要一個平台（LINE 或 Telegram）
   const lineToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
   const lineSecret = process.env.LINE_CHANNEL_SECRET;
-  if (!lineToken || !lineSecret) {
-    throw new Error('LINE_CHANNEL_ACCESS_TOKEN 和 LINE_CHANNEL_SECRET 為必填');
+  const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+
+  const hasLine = !!(lineToken && lineSecret);
+  const hasTelegram = !!telegramToken;
+
+  if (!hasLine && !hasTelegram) {
+    throw new Error('至少需要設定一個平台：LINE (LINE_CHANNEL_ACCESS_TOKEN + LINE_CHANNEL_SECRET) 或 Telegram (TELEGRAM_BOT_TOKEN)');
   }
 
+  // LLM 設定：至少需要一個 LLM provider
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   const groqKey = process.env.GROQ_API_KEY;
-  if (!anthropicKey && !groqKey) {
-    throw new Error('至少需要設定 ANTHROPIC_API_KEY 或 GROQ_API_KEY 其中之一');
+  const cerebrasKey = process.env.CEREBRAS_API_KEY;
+
+  if (!anthropicKey && !groqKey && !cerebrasKey) {
+    throw new Error('至少需要設定 ANTHROPIC_API_KEY、GROQ_API_KEY 或 CEREBRAS_API_KEY 其中之一');
   }
 
+  // Provider 偵測：計算有幾個 LLM key
+  const llmCount = [anthropicKey, groqKey, cerebrasKey].filter(Boolean).length;
   let provider: AppConfig['llm']['provider'];
-  if (anthropicKey && groqKey) {
+  if (llmCount >= 2) {
     provider = 'hybrid';
   } else if (anthropicKey) {
     provider = 'claude-only';
-  } else {
+  } else if (groqKey) {
     provider = 'groq-only';
+  } else {
+    provider = 'cerebras-only';
   }
 
   return {
-    line: {
-      channelAccessToken: lineToken,
-      channelSecret: lineSecret,
-    },
+    ...(hasLine && {
+      line: {
+        channelAccessToken: lineToken!,
+        channelSecret: lineSecret!,
+      },
+    }),
+    ...(hasTelegram && {
+      telegram: {
+        botToken: telegramToken!,
+      },
+    }),
     llm: {
       provider,
       ...(anthropicKey && {
@@ -71,9 +101,16 @@ export function loadConfig(): AppConfig {
           model: validateGroqModel(process.env.GROQ_MODEL || GROQ_DEFAULT_MODEL),
         },
       }),
+      ...(cerebrasKey && {
+        cerebras: {
+          apiKey: cerebrasKey,
+          model: validateCerebrasModel(process.env.CEREBRAS_MODEL || CEREBRAS_DEFAULT_MODEL),
+        },
+      }),
     },
     port: parseInt(process.env.PORT || '3000', 10),
     nodeEnv: process.env.NODE_ENV || 'development',
+    webhookBaseUrl: process.env.WEBHOOK_BASE_URL,
   };
 }
 
@@ -132,6 +169,8 @@ export interface User {
   line_user_id: string;
   display_name: string;
   memory_md: string;
+  platform: string;
+  platform_user_id: string;
   created_at: string;
   updated_at: string;
 }
@@ -225,7 +264,7 @@ export interface SkillImportResult {
 export interface ModelInfo {
   id: string;
   name: string;
-  provider: 'groq' | 'claude';
+  provider: 'groq' | 'claude' | 'cerebras';
   toolCalling: boolean;
   /** 需要在 user prompt 結尾附加 /no_think 加速回應（Qwen3 系列） */
   needsNoThink: boolean;
@@ -339,9 +378,40 @@ export const CLAUDE_MODEL_REGISTRY: Record<string, ModelInfo> = {
   },
 };
 
+export const CEREBRAS_MODEL_REGISTRY: Record<string, ModelInfo> = {
+  'gpt-oss-120b': {
+    id: 'gpt-oss-120b',
+    name: 'GPT-OSS 120B',
+    provider: 'cerebras',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: 'Production, 3000 tok/s, 131K context',
+  },
+  'qwen-3-235b-a22b-instruct-2507': {
+    id: 'qwen-3-235b-a22b-instruct-2507',
+    name: 'Qwen3 235B A22B',
+    provider: 'cerebras',
+    toolCalling: true,
+    needsNoThink: true,
+    needsThinkCleanup: true,
+    note: 'Preview, Qwen3 系列需 /no_think',
+  },
+  'zai-glm-4.7': {
+    id: 'zai-glm-4.7',
+    name: 'ZAI GLM 4.7',
+    provider: 'cerebras',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: 'Preview, RPD=100',
+  },
+};
+
 const GROQ_DEFAULT_MODEL = 'qwen/qwen3-32b';
 const CLAUDE_DEFAULT_DEFAULT_MODEL = 'claude-haiku-4-5-20250501';
 const CLAUDE_DEFAULT_COMPLEX_MODEL = 'claude-sonnet-4-5-20250514';
+const CEREBRAS_DEFAULT_MODEL = 'gpt-oss-120b';
 
 /**
  * 驗證 Groq 模型是否在白名單中，回傳驗證後的 model ID
@@ -370,10 +440,23 @@ function validateClaudeModel(model: string, fallback: string): string {
 }
 
 /**
+ * 驗證 Cerebras 模型是否在白名單中
+ */
+function validateCerebrasModel(model: string): string {
+  if (CEREBRAS_MODEL_REGISTRY[model]) {
+    return model;
+  }
+  const available = Object.keys(CEREBRAS_MODEL_REGISTRY).join(', ');
+  console.warn(`[config] CEREBRAS_MODEL "${model}" 不在白名單中，改用預設 ${CEREBRAS_DEFAULT_MODEL}`);
+  console.warn(`[config] 可用的 Cerebras 模型: ${available}`);
+  return CEREBRAS_DEFAULT_MODEL;
+}
+
+/**
  * 根據模型 ID 取得模型資訊
  */
 export function getModelInfo(modelId: string): ModelInfo | undefined {
-  return GROQ_MODEL_REGISTRY[modelId] || CLAUDE_MODEL_REGISTRY[modelId];
+  return GROQ_MODEL_REGISTRY[modelId] || CLAUDE_MODEL_REGISTRY[modelId] || CEREBRAS_MODEL_REGISTRY[modelId];
 }
 
 // ============================================

@@ -19,12 +19,25 @@ import {
 } from './config';
 
 // ============================================
+// OpenAI 相容 Provider 介面
+// ============================================
+
+interface OpenAICompatProvider {
+  client: OpenAI;
+  model: string;
+  providerName: string;
+  /** 是否在 tool 定義中加入 strict: true（某些 provider 支援） */
+  strictTools?: boolean;
+}
+
+// ============================================
 // 模組狀態
 // ============================================
 
 let currentConfig: AppConfig | null = null;
 let claudeClient: Anthropic | null = null;
 let groqClient: OpenAI | null = null;
+let cerebrasClient: OpenAI | null = null;
 
 // ============================================
 // 初始化
@@ -55,6 +68,16 @@ export function initLLM(config: AppConfig): void {
     console.log(`[LLM] Groq provider 已初始化 — model: ${groq.model}`);
   }
 
+  // 初始化 Cerebras client（OpenAI 相容格式）
+  const cerebras = config.llm.cerebras;
+  if (cerebras) {
+    cerebrasClient = new OpenAI({
+      apiKey: cerebras.apiKey,
+      baseURL: 'https://api.cerebras.ai/v1',
+    });
+    console.log(`[LLM] Cerebras provider 已初始化 — model: ${cerebras.model}`);
+  }
+
   console.log(`[LLM] 執行模式: ${provider}`);
 }
 
@@ -78,14 +101,27 @@ export async function chat(options: ChatOptions): Promise<ChatResponse> {
       return chatWithClaude(options, complexity);
 
     case 'groq-only':
-      return chatWithGroq(options);
+      return chatWithOpenAICompat(options, getGroqProvider());
 
-    case 'hybrid':
-      // 混合模式：simple/moderate → Groq，complex → Claude
-      if (complexity === 'complex') {
+    case 'cerebras-only':
+      return chatWithOpenAICompat(options, getCerebrasProvider());
+
+    case 'hybrid': {
+      // 混合模式：complex → Claude（若有），simple → Groq（若有）→ Cerebras（若有）→ Claude
+      if (complexity === 'complex' && currentConfig.llm.claude) {
         return chatWithClaude(options, complexity);
       }
-      return chatWithGroq(options);
+      if (currentConfig.llm.groq) {
+        return chatWithOpenAICompat(options, getGroqProvider());
+      }
+      if (currentConfig.llm.cerebras) {
+        return chatWithOpenAICompat(options, getCerebrasProvider());
+      }
+      if (currentConfig.llm.claude) {
+        return chatWithClaude(options, complexity);
+      }
+      throw new Error('[LLM] hybrid 模式但無可用的 provider');
+    }
 
     default:
       throw new Error(`[LLM] 未知的 provider: ${provider}`);
@@ -106,6 +142,8 @@ export function getProviderInfo(): { provider: string; model: string } {
 
   const { provider, claude, groq } = currentConfig.llm;
 
+  const cerebras = currentConfig.llm.cerebras;
+
   switch (provider) {
     case 'claude-only':
       return {
@@ -117,11 +155,21 @@ export function getProviderInfo(): { provider: string; model: string } {
         provider: 'groq-only',
         model: groq!.model,
       };
-    case 'hybrid':
+    case 'cerebras-only':
+      return {
+        provider: 'cerebras-only',
+        model: cerebras!.model,
+      };
+    case 'hybrid': {
+      const parts: string[] = [];
+      if (groq) parts.push(`Groq(${groq.model})`);
+      if (cerebras) parts.push(`Cerebras(${cerebras.model})`);
+      if (claude) parts.push(`Claude(${claude.complexModel})`);
       return {
         provider: 'hybrid',
-        model: `Groq(${groq!.model}) + Claude(${claude!.complexModel})`,
+        model: parts.join(' + '),
       };
+    }
     default:
       return { provider: 'unknown', model: 'unknown' };
   }
@@ -317,23 +365,44 @@ function convertToolToAnthropic(tool: ToolDefinition): Anthropic.Tool {
 }
 
 // ============================================
-// Groq Provider 實作
+// OpenAI 相容 Provider Helper
+// ============================================
+
+function getGroqProvider(): OpenAICompatProvider {
+  if (!groqClient || !currentConfig?.llm.groq) {
+    throw new Error('[LLM] Groq client 未初始化');
+  }
+  return {
+    client: groqClient,
+    model: currentConfig.llm.groq.model,
+    providerName: 'groq',
+  };
+}
+
+function getCerebrasProvider(): OpenAICompatProvider {
+  if (!cerebrasClient || !currentConfig?.llm.cerebras) {
+    throw new Error('[LLM] Cerebras client 未初始化');
+  }
+  return {
+    client: cerebrasClient,
+    model: currentConfig.llm.cerebras.model,
+    providerName: 'cerebras',
+  };
+}
+
+// ============================================
+// OpenAI 相容 Provider 實作（Groq / Cerebras 共用）
 // ============================================
 
 /**
- * 使用 Groq API（OpenAI 相容格式）進行對話
+ * 使用 OpenAI 相容 API 進行對話
  * - 根據模型註冊表決定前處理行為（/no_think、<think> 清理）
  * - Tool Calling 支援
  * - JSON 輸出有可靠性問題，需要基本驗證
  * - 錯誤處理 + 基本 retry（最多 2 次）
  */
-async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
-  if (!groqClient || !currentConfig?.llm.groq) {
-    throw new Error('[LLM] Groq client 未初始化');
-  }
-
-  const groqConfig = currentConfig.llm.groq;
-  const model = groqConfig.model;
+async function chatWithOpenAICompat(options: ChatOptions, provider: OpenAICompatProvider): Promise<ChatResponse> {
+  const { client, model, providerName } = provider;
   const modelInfo = getModelInfo(model);
   const maxTokens = options.maxTokens || MAX_TOKENS_DEFAULT;
 
@@ -387,7 +456,7 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
 
   // 轉換 tools 為 OpenAI 格式
   const tools: OpenAI.ChatCompletionTool[] | undefined = options.tools?.map(
-    convertToolToOpenAI
+    (t) => convertToolToOpenAI(t, provider.strictTools)
   );
 
   // retry 邏輯（最多 2 次）
@@ -401,7 +470,7 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
           ? 'none' as const
           : 'auto' as const;
 
-      const response = await groqClient.chat.completions.create({
+      const response = await client.chat.completions.create({
         model,
         max_tokens: maxTokens,
         messages,
@@ -410,7 +479,7 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
 
       const choice = response.choices[0];
       if (!choice) {
-        throw new Error('[LLM] Groq API 未回傳任何 choice');
+        throw new Error(`[LLM] ${providerName} API 未回傳任何 choice`);
       }
 
       const rawContent = choice.message.content || '';
@@ -429,7 +498,7 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
         })
       );
 
-      // JSON mode 驗證（Groq/Qwen 的 JSON 輸出可能不可靠）
+      // JSON mode 驗證（某些 provider 的 JSON 輸出可能不可靠）
       if (options.jsonMode && content) {
         validateJsonOutput(content);
       }
@@ -441,13 +510,13 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
           inputTokens: response.usage?.prompt_tokens || 0,
           outputTokens: response.usage?.completion_tokens || 0,
         },
-        provider: 'groq',
+        provider: providerName,
         model,
       };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       console.error(
-        `[LLM] Groq API 錯誤 (attempt ${attempt + 1}/3): ${lastError.message}`
+        `[LLM] ${providerName} API 錯誤 (attempt ${attempt + 1}/3): ${lastError.message}`
       );
 
       // 認證錯誤不重試
@@ -467,14 +536,15 @@ async function chatWithGroq(options: ChatOptions): Promise<ChatResponse> {
     }
   }
 
-  throw lastError || new Error('[LLM] Groq API 呼叫失敗（已重試 3 次）');
+  throw lastError || new Error(`[LLM] ${provider.providerName} API 呼叫失敗（已重試 3 次）`);
 }
 
 /**
  * 將 config.ts 的 ToolDefinition 轉換為 OpenAI Tool 格式
  */
 function convertToolToOpenAI(
-  tool: ToolDefinition
+  tool: ToolDefinition,
+  strict?: boolean
 ): OpenAI.ChatCompletionTool {
   return {
     type: 'function',
@@ -482,6 +552,7 @@ function convertToolToOpenAI(
       name: tool.name,
       description: tool.description,
       parameters: tool.input_schema,
+      ...(strict ? { strict: true } : {}),
     },
   };
 }

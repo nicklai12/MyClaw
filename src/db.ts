@@ -106,6 +106,24 @@ function createTables(): void {
     // 欄位已存在，忽略
   }
 
+  // 多平台支援：新增 platform 和 platform_user_id 欄位
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN platform TEXT DEFAULT 'line'`);
+    console.log('[db] 已新增 users.platform 欄位');
+  } catch {
+    // 欄位已存在，忽略
+  }
+
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN platform_user_id TEXT DEFAULT ''`);
+    console.log('[db] 已新增 users.platform_user_id 欄位');
+  } catch {
+    // 欄位已存在，忽略
+  }
+
+  // Backfill：將現有 LINE 使用者的 platform_user_id 設為 line_user_id
+  db.exec(`UPDATE users SET platform_user_id = line_user_id WHERE platform_user_id = ''`);
+
   console.log('[db] 資料表已就緒 (users, skills, messages, scheduled_tasks)');
 }
 
@@ -113,10 +131,18 @@ function createTables(): void {
 // Users CRUD
 // ============================================
 
-export function getOrCreateUser(lineUserId: string, displayName?: string): User {
-  const existing = db.prepare(
-    'SELECT * FROM users WHERE line_user_id = ?'
-  ).get(lineUserId) as User | undefined;
+export function getOrCreateUser(platformUserId: string, platform: string = 'line', displayName?: string): User {
+  // 先用 platform + platform_user_id 查詢
+  let existing = db.prepare(
+    'SELECT * FROM users WHERE platform = ? AND platform_user_id = ?'
+  ).get(platform, platformUserId) as User | undefined;
+
+  // LINE 向後相容：也查 line_user_id
+  if (!existing && platform === 'line') {
+    existing = db.prepare(
+      'SELECT * FROM users WHERE line_user_id = ?'
+    ).get(platformUserId) as User | undefined;
+  }
 
   if (existing) {
     // 若有提供新的 displayName 且與現有不同，更新之
@@ -129,16 +155,26 @@ export function getOrCreateUser(lineUserId: string, displayName?: string): User 
     return existing;
   }
 
+  const lineUserId = platform === 'line' ? platformUserId : '';
   const result = db.prepare(
-    'INSERT INTO users (line_user_id, display_name) VALUES (?, ?)'
-  ).run(lineUserId, displayName || '');
+    'INSERT INTO users (line_user_id, display_name, platform, platform_user_id) VALUES (?, ?, ?, ?)'
+  ).run(lineUserId, displayName || '', platform, platformUserId);
 
   const newUser = db.prepare(
     'SELECT * FROM users WHERE id = ?'
   ).get(result.lastInsertRowid) as User;
 
-  console.log(`[db] 新使用者已建立: ${lineUserId} (id=${newUser.id})`);
+  console.log(`[db] 新使用者已建立: ${platform}:${platformUserId} (id=${newUser.id})`);
   return newUser;
+}
+
+/**
+ * 根據平台和平台使用者 ID 查詢使用者（供 scheduler 使用）
+ */
+export function getUserByPlatformId(platform: string, platformUserId: string): User | undefined {
+  return db.prepare(
+    'SELECT * FROM users WHERE platform = ? AND platform_user_id = ?'
+  ).get(platform, platformUserId) as User | undefined;
 }
 
 export function getUserById(userId: number): User | undefined {
