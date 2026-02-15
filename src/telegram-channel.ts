@@ -63,9 +63,19 @@ export class TelegramChannel implements MessageChannel {
       await this.callApi('sendMessage', {
         chat_id: platformUserId,
         text: truncated,
+        parse_mode: 'Markdown',
       });
     } catch (error) {
-      console.error('[telegram-channel] sendMessage 失敗:', error);
+      // Markdown 解析失敗時 fallback 為純文字
+      console.warn('[telegram-channel] Markdown 發送失敗，改用純文字:', (error as Error).message);
+      try {
+        await this.callApi('sendMessage', {
+          chat_id: platformUserId,
+          text: truncated,
+        });
+      } catch (fallbackError) {
+        console.error('[telegram-channel] sendMessage 失敗:', fallbackError);
+      }
     }
   }
 
@@ -91,9 +101,20 @@ export class TelegramChannel implements MessageChannel {
         chat_id: platformUserId,
         message_id: messageId,
         text: truncated,
+        parse_mode: 'Markdown',
       });
     } catch (error) {
-      console.error('[telegram-channel] editMessageText 失敗:', error);
+      // Markdown 解析失敗時 fallback 為純文字
+      console.warn('[telegram-channel] Markdown editMessage 失敗，改用純文字:', (error as Error).message);
+      try {
+        await this.callApi('editMessageText', {
+          chat_id: platformUserId,
+          message_id: messageId,
+          text: truncated,
+        });
+      } catch (fallbackError) {
+        console.error('[telegram-channel] editMessageText 失敗:', fallbackError);
+      }
     }
   }
 

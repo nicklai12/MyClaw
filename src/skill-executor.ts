@@ -117,14 +117,30 @@ export async function executeSkill(
     const systemPrompt = buildSkillSystemPrompt(skill, memory, hasTools, credentialService);
     const messages: ChatMessage[] = [{ role: 'user', content: userMessage }];
 
+    // prompt-only 技能靠 LLM 文字生成能力，需要較好的模型；有工具的技能用便宜模型即可
+    const complexity = hasTools ? 'simple' : 'complex';
+    // prompt-only 技能需要較多輸出空間（如產生報告，中文每字約 2-3 tokens），有工具的技能 1024 已足夠
+    const maxTokens = hasTools ? 1024 : 4096;
+
     // 第一次呼叫 chat — 有工具時強制使用，防止 AI 造假資料
     let response = await chat({
       messages,
       systemPrompt,
-      complexity: 'simple',
-      maxTokens: 1024,
+      complexity,
+      maxTokens,
       ...(hasTools ? { tools: toolDefs, toolChoice: 'any' } : {}),
     });
+
+    // prompt-only 技能：若 LLM 回傳空內容，重試一次
+    if (!hasTools && !response.content?.trim()) {
+      console.warn(`[skill-executor] 技能「${skill.name}」首次回傳空內容 (provider=${response.provider}, model=${response.model})，重試中...`);
+      response = await chat({
+        messages,
+        systemPrompt,
+        complexity,
+        maxTokens,
+      });
+    }
 
     // Tool Calling Loop
     let iteration = 0;
@@ -169,8 +185,8 @@ export async function executeSkill(
       response = await chat({
         messages,
         systemPrompt,
-        complexity: 'simple',
-        maxTokens: 1024,
+        complexity,
+        maxTokens,
         ...(hasTools ? { tools: toolDefs } : {}),
       });
     }

@@ -239,9 +239,16 @@ function buildSystemPrompt(memory: string, displayName: string, skills: import('
     prompt += `\n\n## 使用者記憶\n以下是你記住的關於此使用者的資訊：\n${memory}`;
   }
 
+  // 注入 LLM 模型身份資訊
+  const providerInfo = getProviderInfo();
+  prompt += `\n\n## 你的 AI 模型身份
+你目前使用的 LLM 是：${providerInfo.provider} 模式，模型為 ${providerInfo.model}。
+當使用者詢問你是什麼模型、用什麼 LLM 時，請如實告知上述資訊。`;
+
   prompt += `\n\n## 注意事項
 - 回覆保持簡潔，不要過度冗長
 - 使用繁體中文
+- 當使用者詢問你是哪個模型或大語言模型時，如實回答你的 AI 模型身份
 - 當使用者詢問有什麼技能時，必須根據上方「使用者的技能」區塊的資料庫資料回答，不要自己編造
 - 如果使用者想要建立技能，引導他們說出技能名稱、觸發方式和功能描述
 - 如果使用者傳送 GitHub URL，詢問是否要匯入為技能`;
