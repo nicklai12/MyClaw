@@ -19,7 +19,7 @@ Telegram ──→   /webhook/line           ├── Claude-only：只有 ANTH
                                        └── 混合模式：>=2 個 API Key
                                             └── 簡單→Groq/Cerebras, 複雜→Claude
 SQLite (better-sqlite3) + node-cron
-14 個源碼檔案
+15 個源碼檔案
 ```
 
 ## 目錄結構
@@ -39,6 +39,7 @@ src/
 ├── skill-executor.ts     # 技能觸發判斷 + 動態工具呼叫執行
 ├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立 ToolDefinition[]
 ├── http-executor.ts      # 通用 HTTP 執行器 + bearer token 快取
+├── mcp-client.ts         # MCP Client Manager（全域 MCP Server 連線管理）
 └── scheduler.ts          # node-cron 排程任務（多平台推送）
 ```
 
@@ -59,6 +60,7 @@ src/
 | `skill-executor.ts` | 關鍵字/模式/cron 觸發判斷、動態工具呼叫迴圈（max 5 次）、執行技能 prompt | llm, db, memory, dynamic-tool-builder, http-executor |
 | `dynamic-tool-builder.ts` | 從 ApiConfig 動態建立 ToolDefinition[]（api_call 通用工具） | config |
 | `http-executor.ts` | 通用 HTTP 執行器、bearer token 自動登入與快取、api_key 注入 | config, db |
+| `mcp-client.ts` | MCP Client Manager：全域 MCP Server 連線、工具列表快取、工具呼叫路由 | config |
 | `scheduler.ts` | node-cron 排程、定時技能觸發、多平台推送 | db, skill-executor, channel |
 
 ## 技術棧
@@ -100,6 +102,9 @@ CEREBRAS_MODEL=gpt-oss-120b                       # Cerebras 模型
 PORT=3000                    # HTTP port
 NODE_ENV=development         # development | production
 WEBHOOK_BASE_URL=            # Telegram webhook 自動註冊用（如 https://yourdomain.com）
+
+# MCP Servers（選填，JSON 陣列）
+MCP_SERVERS='[{"name":"playwright","transport":{"type":"sse","url":"http://127.0.0.1:8080/sse"}}]'
 ```
 
 ## 開發指令

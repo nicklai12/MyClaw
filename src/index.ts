@@ -12,6 +12,7 @@ import { isSkillManagementIntent, handleSkillManagement } from './skill-manager'
 import { findMatchingSkill, executeSkill } from './skill-executor';
 import { isSkillImportIntent, importSkillFromURL } from './skill-importer';
 import { initScheduler } from './scheduler';
+import { initMcpClients, shutdownMcpClients, getConnectedServerNames, getAllMcpTools } from './mcp-client';
 import type { MessageChannel, IncomingMessage } from './channel';
 import { LineChannel } from './line-channel';
 import { TelegramChannel } from './telegram-channel';
@@ -310,11 +311,17 @@ function setupRoutes(config: AppConfig): void {
   });
 
   app.get('/health', (_req, res) => {
+    const mcpServers = getConnectedServerNames();
+    const mcpTools = getAllMcpTools();
     res.json({
       status: 'ok',
       provider: providerInfo.provider,
       model: providerInfo.model,
       platforms: channels.map((ch) => ch.platform),
+      mcp: mcpServers.length > 0 ? {
+        servers: mcpServers,
+        tools: mcpTools.map(t => t.name),
+      } : undefined,
       uptime: process.uptime(),
     });
   });
@@ -378,14 +385,29 @@ async function main(): Promise<void> {
     initLLM(config);
     console.log('[index] LLM Provider 已初始化');
 
-    // 4. 設定路由（內部初始化各平台 channel）
+    // 4. 初始化 MCP Clients（選填）
+    if (config.mcp && config.mcp.servers.length > 0) {
+      await initMcpClients(config.mcp.servers);
+      console.log('[index] MCP Clients 已初始化');
+    }
+
+    // 5. 設定路由（內部初始化各平台 channel）
     setupRoutes(config);
 
-    // 5. 初始化排程
+    // 6. 初始化排程
     initScheduler(config, channels);
     console.log('[index] 排程系統已初始化');
 
-    // 6. 啟動 Express 伺服器
+    // 7. Graceful shutdown — 清理 MCP 連線
+    const shutdown = async () => {
+      console.log('[index] 正在關閉 MCP 連線...');
+      await shutdownMcpClients();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+
+    // 8. 啟動 Express 伺服器
     app.listen(config.port, () => {
       const info = getProviderInfo();
       const platformList = channels.map((ch) => ch.platform).join(', ');

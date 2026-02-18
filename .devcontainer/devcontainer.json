@@ -2,6 +2,12 @@
   "name": "MyClaw LINE AI Assistant",
   "image": "mcr.microsoft.com/devcontainers/typescript-node:20",
   "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "MyClaw Webhook",
+      "visibility": "public"
+    }
+  },
   "postCreateCommand": "npm install",
   "customizations": {
     "vscode": {

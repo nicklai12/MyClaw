@@ -293,6 +293,10 @@ research/
 ├── 18-gemini-anti-fabrication/          # Gemini 模型防造假可行性研究
 ├── 19-cerebras-cloud-models/            # Cerebras Cloud 免費模型研究
 ├── 19-messaging-platform-comparison/    # LINE/Telegram/Discord 平台比較研究
+├── 20-mcp-integration/                  # MCP 整合可行性研究
+│   ├── mcp-protocol-research.md         # MCP 協議規格與 SDK 生態
+│   ├── mcp-integration-analysis.md      # MyClaw 架構與 MCP 整合點分析
+│   └── mcp-chrome-devtools-research.md  # Chrome DevTools MCP Server 研究
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```
@@ -769,3 +773,216 @@ MyClaw 架構擴充方向：
 14. Credential 加密儲存
 15. 🆕 新增 Telegram Channel 支援（MessageChannel 抽象接口 + Telegram Bot API 整合）
 16. 🆕 Telegram 串流輸出（editMessageText 模擬逐字顯示）
+17. 🆕 MCP 整合 Phase 1：基礎 MCP Client + Playwright MCP Server 連線
+18. 🆕 MCP 整合 Phase 2：skill-executor MCP 工具路由 + Agent Skills 支援 MCP 工具
+19. 🆕 MCP 整合 Phase 3：Browser 技能範本 + 圖片訊息回傳
+
+---
+
+### Round 11 研究（2026-02-18）— MCP 整合可行性
+
+> 完整報告：`research/20-mcp-integration/`
+> - `mcp-protocol-research.md` — MCP 協議規格與 SDK 生態
+> - `mcp-integration-analysis.md` — MyClaw 架構整合點分析
+> - `mcp-chrome-devtools-research.md` — Chrome DevTools MCP Server 研究
+
+#### 20a. MCP 協議規格與 SDK 生態
+
+**MCP (Model Context Protocol) 是 Anthropic 推出的開放協議標準，用於標準化 LLM 應用與外部工具的整合。**
+
+##### 核心架構
+- **Host/Client/Server 三層模型**：MyClaw 作為 Host，透過 Client 連接多個 MCP Servers
+- **Transport 層**：stdio（本地子程序）和 Streamable HTTP（遠端服務）兩種標準
+- **JSON-RPC 2.0 通訊**，Client 與 Server 維持有狀態連線
+
+##### Tool Schema 高度相容
+- **MCP、OpenAI、Anthropic 三者核心都是 JSON Schema**，轉換幾乎 1:1 映射
+- MCP `inputSchema` ↔ MyClaw `input_schema`：只需重新命名 key，JSON Schema 內容完全相同
+- 現有 `ToolDefinition` 介面無需修改，轉換函式只需 3 行
+
+##### SDK 選擇
+- 推薦 `@modelcontextprotocol/sdk` v1（穩定版），需 `zod` peer dependency
+- v2 預計 2026 Q1 發布，拆分為 `@modelcontextprotocol/client` + `@modelcontextprotocol/server`
+
+##### MCP Server 生態
+- 3,000+ 個 MCP servers 已上線（registry.modelcontextprotocol.io）
+- 官方 Reference Servers：Filesystem、Git、Memory、Fetch 等
+- 知名社群 Servers：Chrome DevTools、Playwright、Figma、Slack 等
+
+##### 限制
+- ESM/CJS 互操作問題（MCP SDK 是 ESM，MyClaw 是 CommonJS）
+- stdio transport 需管理子程序生命週期
+- Zod 依賴（MyClaw 目前未使用）
+
+#### 20b. MyClaw 架構整合點分析
+
+**核心發現：現有架構天然適合 MCP 整合，改動極小。**
+
+##### 整合架構圖
+
+```
+                          MCP Servers（全域管理）
+                          ├── playwright (SSE/HTTP)
+                          ├── filesystem (stdio)
+                          └── custom-api (SSE)
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────┐
+│  mcp-client.ts: McpClientManager（新增）              │
+│  ├── connect() / disconnect()                        │
+│  ├── listTools(serverName?) → ToolDefinition[]       │
+│  └── callTool(prefixedName, args) → string           │
+└──────────────────────┬──────────────────────────────┘
+                       │
+          ┌────────────┴────────────┐
+          ▼                         ▼
+┌──────────────────┐    ┌───────────────────────┐
+│ dynamic-tool-    │    │ mcp-tool-adapter.ts   │
+│ builder.ts       │    │ (新增)                 │
+│ (不修改)          │    │ mcpTool→ToolDefinition│
+│ api_call 工具    │    │ 名稱前綴管理            │
+└────────┬─────────┘    └───────────┬───────────┘
+         └────────┬─────────────────┘
+                  ▼ 合併
+┌──────────────────────────────────────────────────────┐
+│  skill-executor.ts: executeSkill()（修改）             │
+│  ├── toolDefs = [...apiCallTools, ...mcpTools]        │
+│  └── Tool Calling Loop:                               │
+│      ├── api_call      → http-executor.ts（原有）      │
+│      ├── mcp__*        → mcp-client.ts callTool()     │
+│      └── set_*_creds   → http-executor.ts（原有）      │
+└──────────────────────────────────────────────────────┘
+                  │
+                  ▼
+         llm.ts: chat()  ← 完全不需修改
+```
+
+##### 改動範圍
+
+| 操作 | 檔案 | 說明 |
+|------|------|------|
+| **新增** | `mcp-client.ts` | MCP Client Manager，管理 server 連線、工具列表、工具呼叫 |
+| **新增** | `mcp-tool-adapter.ts` | MCP tool → ToolDefinition 轉換、`mcp__{server}__{tool}` 名稱前綴 |
+| **修改** | `config.ts` | 新增 `McpServerConfig` 型別 |
+| **修改** | `skill-executor.ts` | Tool calling loop 新增 MCP 路由分支 |
+| **修改** | `index.ts` | 啟動時初始化 McpClientManager |
+| **不修改** | `llm.ts` | 只消費 ToolDefinition/ToolCall，MCP 完全透明 |
+| **不修改** | `channel.ts`, `dynamic-tool-builder.ts`, `http-executor.ts`, `db.ts` | 無影響 |
+
+##### Agent Skills 能否調用 MCP 工具？— **可以**
+
+**推薦方案：全域 MCP Server + 技能選擇器**
+
+- MCP servers 在 app 層全域管理（啟動時連線，常駐）
+- 技能透過 `api_config.mcp_servers: ["playwright", "filesystem"]` 聲明使用哪些 server
+- 執行時從全域 MCP manager 取得對應工具，合併到 toolDefs
+- **向後完全相容**：沒有 `mcp_servers` 的技能行為不變
+
+**不建議技能級管理 MCP server**：MCP 連線有狀態（stdio 進程或 SSE），每技能一個太浪費資源。
+
+##### 全域 MCP 配置方式
+
+```json
+// mcp-servers.json（或環境變數 MCP_SERVERS）
+{
+  "servers": [
+    {
+      "name": "playwright",
+      "transport": {
+        "type": "sse",
+        "url": "http://127.0.0.1:8080/sse"
+      }
+    },
+    {
+      "name": "filesystem",
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+      }
+    }
+  ]
+}
+```
+
+#### 20c. Chrome DevTools MCP Server 研究
+
+**比較了 6 個主要實作，推薦 Microsoft Playwright MCP。**
+
+##### 比較表
+
+| 項目 | Google chrome-devtools-mcp | **Microsoft playwright-mcp** | ByteDance browser-mcp |
+|------|---------------------------|------------------------------|----------------------|
+| 工具數 | 26 | 19 核心 + 擴展 30+ | 21 + 2 vision |
+| 核心方法 | Screenshot + DOM | **Accessibility Tree** | Accessibility + Vision |
+| Transport | stdio 僅 | **stdio / SSE / HTTP** | stdio / SSE |
+| 維護 | Google 官方 | **Microsoft 官方** | ByteDance |
+| Headless | 是 | **是** | 是 |
+
+##### 推薦 Playwright MCP 理由
+
+1. **原生 SSE/HTTP transport** — MyClaw Server 可直接連線，無需 proxy
+2. **Accessibility Tree 方法** — 不需 vision model，LLM token 用量低，與文字 LLM 完美搭配
+3. **Microsoft 官方維護**，跨瀏覽器（Chromium/Firefox/WebKit）
+4. **`--headless` 原生支援**，Server 部署友好
+
+##### 部署架構
+
+```
+MyClaw Server (Express.js)
+├── 現有：LLM Provider (Claude / Groq / Cerebras)
+├── 現有：SQLite + skill-executor
+└── 新增：MCP Client
+      ↓ SSE (localhost:8080)
+    Playwright MCP Server (--headless --port 8080)
+      ↓ CDP
+    Headless Chromium (~1GB RAM)
+```
+
+##### MyClaw 用例場景
+
+| 場景 | 所需工具 | 優先度 |
+|------|----------|--------|
+| 網頁截圖 | navigate + screenshot | 高 |
+| 資料擷取 | navigate + snapshot + evaluate | 高 |
+| 表單填寫 | navigate + fill_form + click | 中 |
+| 定時監控 | cron + navigate + getText | 中 |
+| PDF 生成 | navigate + pdf_save | 低 |
+
+##### 風險
+
+| 風險 | 緩解 |
+|------|------|
+| Chrome 記憶體高（200-500 MB/實例） | 單實例模式、操作完關閉頁面 |
+| 操作耗時（>5s） | 先回「處理中...」再 editMessage |
+| 並發限制 | Queue 機制、per-user browser context |
+
+#### 20d. 綜合結論與實作建議
+
+##### MCP 整合可行性：✅ 高度可行
+
+| 面向 | 結論 |
+|------|------|
+| Schema 相容 | MCP ↔ ToolDefinition 近乎 1:1，轉換極簡單 |
+| 架構影響 | 新增 2 檔、修改 3 檔、不修改 6 檔，llm.ts 零改動 |
+| Agent Skills 支援 MCP | ✅ 可行，透過 `api_config.mcp_servers` 聲明即可 |
+| 向後相容 | 完全相容，無 MCP 配置時行為不變 |
+| 新依賴 | `@modelcontextprotocol/sdk` + `zod`（2 個） |
+
+##### 建議分三階段實施
+
+**Phase 1：MCP Client 基礎建設**
+- 新增 `mcp-client.ts` + `mcp-tool-adapter.ts`
+- 修改 `config.ts`（McpServerConfig 型別）+ `index.ts`（初始化）
+- 環境變數 `MCP_SERVERS` 或配置檔 `mcp-servers.json`
+- 驗證：連線 MCP server、listTools()、callTool()
+
+**Phase 2：skill-executor 整合**
+- `skill-executor.ts` tool calling loop 新增 `mcp__*` 路由分支
+- `api_config` 擴展 `mcp_servers?: string[]` 欄位
+- 驗證：Agent Skill 透過 `mcp_servers: ["playwright"]` 調用瀏覽器工具
+
+**Phase 3：Browser 技能範本 + 圖片回傳**
+- 預建「網頁截圖」「資料擷取」等技能範本
+- LINE/Telegram 圖片訊息回傳支援
+- Playwright MCP Server Docker 化部署

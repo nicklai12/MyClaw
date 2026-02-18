@@ -4,6 +4,13 @@
 
 export type PlatformType = 'line' | 'telegram';
 
+export interface McpServerConfig {
+  name: string;
+  transport:
+    | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+    | { type: 'sse'; url: string; headers?: Record<string, string> };
+}
+
 export interface AppConfig {
   line?: {
     channelAccessToken: string;
@@ -27,6 +34,9 @@ export interface AppConfig {
       apiKey: string;
       model: string;
     };
+  };
+  mcp?: {
+    servers: McpServerConfig[];
   };
   port: number;
   nodeEnv: string;
@@ -108,6 +118,7 @@ export function loadConfig(): AppConfig {
         },
       }),
     },
+    ...parseMcpConfig(),
     port: parseInt(process.env.PORT || '3000', 10),
     nodeEnv: process.env.NODE_ENV || 'development',
     webhookBaseUrl: process.env.WEBHOOK_BASE_URL,
@@ -211,6 +222,8 @@ export interface ApiConfig {
     api_key_header?: string;      // api_key: header 名稱
     api_key_service?: string;     // api_key: credentials 中的 key 名稱
   };
+  mcp_servers?: string[];  // 技能要使用的 MCP server 名稱列表
+  mcp_tool_filter?: string[];  // 只使用這些 MCP 工具（白名單，不含前綴）
 }
 
 export interface Message {
@@ -468,3 +481,36 @@ export const MAX_SKILLS_PER_USER = 20;
 export const MAX_TOKENS_DEFAULT = 1024;
 export const MAX_MEMORY_LENGTH = 10000;
 export const RECENT_MESSAGES_COUNT = 10;
+
+// ============================================
+// MCP 配置解析
+// ============================================
+
+/**
+ * 解析 MCP_SERVERS 環境變數
+ * 格式：JSON 陣列，例如：
+ * [{"name":"playwright","transport":{"type":"sse","url":"http://127.0.0.1:8080/sse"}}]
+ */
+function parseMcpConfig(): { mcp?: { servers: McpServerConfig[] } } {
+  const raw = process.env.MCP_SERVERS;
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw) as McpServerConfig[];
+    if (!Array.isArray(parsed) || parsed.length === 0) return {};
+
+    // 基本驗證
+    for (const server of parsed) {
+      if (!server.name || !server.transport || !server.transport.type) {
+        console.warn(`[config] MCP server 配置無效（缺少 name 或 transport）: ${JSON.stringify(server)}`);
+        return {};
+      }
+    }
+
+    console.log(`[config] MCP 配置已載入: ${parsed.map(s => s.name).join(', ')}`);
+    return { mcp: { servers: parsed } };
+  } catch (error) {
+    console.warn(`[config] MCP_SERVERS 環境變數解析失敗: ${error instanceof Error ? error.message : String(error)}`);
+    return {};
+  }
+}

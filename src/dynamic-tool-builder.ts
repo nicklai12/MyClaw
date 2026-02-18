@@ -52,7 +52,12 @@ const API_CALL_TOOL: ToolDefinition = {
  * @returns ToolDefinition 陣列
  */
 export function buildGenericTools(apiConfig: ApiConfig, needsCredentialTool: boolean): ToolDefinition[] {
-  const tools: ToolDefinition[] = [API_CALL_TOOL];
+  const tools: ToolDefinition[] = [];
+
+  // 只有設定了 base_url 才提供 api_call 工具（MCP-only 技能不需要）
+  if (apiConfig.base_url) {
+    tools.push(API_CALL_TOOL);
+  }
 
   if (needsCredentialTool && apiConfig.auth.type !== 'none') {
     const service = apiConfig.auth.credentials_service || 'api';
@@ -84,9 +89,15 @@ export function parseApiConfig(apiConfigJson: string): ApiConfig | null {
 
   try {
     const config = JSON.parse(apiConfigJson) as ApiConfig;
-    if (!config.base_url || !config.auth) {
+    // MCP-only 技能不需要 base_url，只需要 mcp_servers
+    const hasMcp = config.mcp_servers && config.mcp_servers.length > 0;
+    if (!hasMcp && (!config.base_url || !config.auth)) {
       console.warn('[dynamic-tool-builder] api_config 缺少必要欄位 (base_url, auth)');
       return null;
+    }
+    // 確保 auth 至少有預設值
+    if (!config.auth) {
+      config.auth = { type: 'none' };
     }
     return config;
   } catch {

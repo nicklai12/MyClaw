@@ -10,13 +10,14 @@ import { getUserMemory } from './memory';
 import { getUserCredentials } from './db';
 import { buildGenericTools, parseApiConfig } from './dynamic-tool-builder';
 import { executeApiCall, createCredentialExecutor } from './http-executor';
+import { getMcpToolsForServers, isMcpToolCall, callMcpTool } from './mcp-client';
 import type { Skill, ChatMessage, ToolDefinition } from './config';
 
 // ============================================
 // 常數
 // ============================================
 
-const MAX_TOOL_ITERATIONS = 5;
+const MAX_TOOL_ITERATIONS = 8;
 
 // ============================================
 // 觸發偵測
@@ -113,6 +114,26 @@ export async function executeSkill(
       );
     }
 
+    // MCP 工具：技能透過 api_config.mcp_servers 聲明使用哪些 MCP server
+    if (apiConfig?.mcp_servers && apiConfig.mcp_servers.length > 0) {
+      let mcpTools = getMcpToolsForServers(apiConfig.mcp_servers);
+      // 白名單過濾：技能可指定只使用特定 MCP 工具，減少 LLM 混淆
+      if (apiConfig.mcp_tool_filter && apiConfig.mcp_tool_filter.length > 0) {
+        const filter = new Set(apiConfig.mcp_tool_filter);
+        mcpTools = mcpTools.filter(t => {
+          // 工具名稱格式：mcp__{server}__{tool}，比對 tool 部分
+          const toolName = t.name.split('__').slice(2).join('__');
+          return filter.has(toolName) || filter.has(t.name);
+        });
+      }
+      if (mcpTools.length > 0) {
+        toolDefs.push(...mcpTools);
+        console.log(
+          `[skill-executor] 技能「${skill.name}」加入 ${mcpTools.length} 個 MCP 工具 (servers: ${apiConfig.mcp_servers.join(', ')})`
+        );
+      }
+    }
+
     const hasTools = toolDefs.length > 0;
     const systemPrompt = buildSkillSystemPrompt(skill, memory, hasTools, credentialService);
     const messages: ChatMessage[] = [{ role: 'user', content: userMessage }];
@@ -171,6 +192,9 @@ export async function executeSkill(
           // 帳密設定工具
           const credExecutor = createCredentialExecutor(credentialService);
           result = await credExecutor(tc.input, userId);
+        } else if (isMcpToolCall(tc)) {
+          // MCP 工具呼叫：路由到對應的 MCP server
+          result = await callMcpTool(tc.name, tc.input);
         } else {
           result = JSON.stringify({ error: true, message: `未知工具: ${tc.name}` });
         }
@@ -248,10 +272,8 @@ function buildSkillSystemPrompt(
   parts.push('- 如果你無法取得真實資料，必須誠實告知使用者「目前無法取得資料」，不要用假資料充數');
 
   if (hasTools) {
-    parts.push('- 你有一個 api_call 工具，可以呼叫上述技能指令中描述的任何 API 端點');
-    parts.push('- 使用 api_call 時，根據技能指令中的 API 文件指定正確的 method、path 和 body');
-    parts.push('- 必須使用 api_call 工具呼叫真實 API 取得數據');
-    parts.push('- 如果 API 回傳錯誤，如實告知使用者錯誤內容，不要試圖猜測或編造替代資料');
+    parts.push('- 必須使用提供的工具取得真實數據，不可自行編造');
+    parts.push('- 如果工具回傳錯誤，如實告知使用者錯誤內容，不要試圖猜測或編造替代資料');
     if (credentialService) {
       parts.push(`- 如果用戶尚未設定帳密，使用 set_${credentialService}_credentials 工具引導用戶提供帳號密碼`);
     }
