@@ -107,18 +107,17 @@ export async function chat(options: ChatOptions): Promise<ChatResponse> {
       return chatWithOpenAICompat(options, getCerebrasProvider());
 
     case 'hybrid': {
-      // 混合模式：complex → Claude（若有），simple → Groq（若有）→ Cerebras（若有）→ Claude
-      if (complexity === 'complex' && currentConfig.llm.claude) {
-        return chatWithClaude(options, complexity);
-      }
-      if (currentConfig.llm.groq) {
-        return chatWithOpenAICompat(options, getGroqProvider());
-      }
-      if (currentConfig.llm.cerebras) {
-        return chatWithOpenAICompat(options, getCerebrasProvider());
-      }
-      if (currentConfig.llm.claude) {
-        return chatWithClaude(options, complexity);
+      // 混合模式路由：
+      //   complex（報告/生成）→ Claude（品質最好）→ Cerebras（速度快）→ Groq
+      //   simple（tool calling）→ Groq（工具呼叫精準）→ Cerebras（速度快）→ Claude
+      if (complexity === 'complex') {
+        if (currentConfig.llm.claude) return chatWithClaude(options, complexity);
+        if (currentConfig.llm.cerebras) return chatWithOpenAICompat(options, getCerebrasProvider());
+        if (currentConfig.llm.groq) return chatWithOpenAICompat(options, getGroqProvider());
+      } else {
+        if (currentConfig.llm.groq) return chatWithOpenAICompat(options, getGroqProvider());
+        if (currentConfig.llm.cerebras) return chatWithOpenAICompat(options, getCerebrasProvider());
+        if (currentConfig.llm.claude) return chatWithClaude(options, complexity);
       }
       throw new Error('[LLM] hybrid 模式但無可用的 provider');
     }

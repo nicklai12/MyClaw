@@ -88,7 +88,7 @@ WEBHOOK_BASE_URL=            # Telegram webhook 自動註冊（如 https://yourd
 | 只填 `ANTHROPIC_API_KEY` | Claude-only（Haiku 4.5 為主） | $1-12 |
 | 只填 `GROQ_API_KEY` | Groq-only（Qwen3 32B） | $0 |
 | 只填 `CEREBRAS_API_KEY` | Cerebras-only（GPT-OSS 120B） | $0 |
-| 填 >=2 個 LLM Key | 混合模式（簡單→Groq/Cerebras，複雜→Claude） | $0-3 |
+| 填 >=2 個 LLM Key | 混合模式（tool calling→Groq，報告生成→Cerebras，複雜→Claude） | $0-3 |
 
 ## 專案結構
 
@@ -120,6 +120,16 @@ npm run build      # 編譯 TypeScript
 npm start          # 生產模式
 npm run typecheck  # 型別檢查
 ```
+
+### Port 3000 被佔用
+
+重啟 server 時若遇到 port 3000 佔用，執行：
+
+```bash
+lsof -ti :3000 | xargs kill -9
+```
+
+> **Codespaces 注意**：每次重啟 server 後，需到 Ports 面板將 port 3000 的 Visibility 設為 **Public**，Telegram webhook 才能收到訊息。
 
 ## 技術棧
 

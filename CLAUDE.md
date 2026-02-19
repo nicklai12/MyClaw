@@ -214,7 +214,8 @@ scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, ena
 ├── 只有 GROQ_API_KEY         → groq-only 模式
 ├── 只有 CEREBRAS_API_KEY     → cerebras-only 模式
 ├── >=2 個 LLM API Key        → hybrid 混合模式
-│    └── complex → Claude（若有），simple → Groq（若有）→ Cerebras（若有）→ Claude
+│    ├── complex（報告/生成）→ Claude（品質最好）→ Cerebras（速度快）→ Groq
+│    └── simple（tool calling）→ Groq（工具呼叫精準）→ Cerebras（速度快）→ Claude
 └── 都沒有                     → 啟動失敗，提示使用者
 ```
 
