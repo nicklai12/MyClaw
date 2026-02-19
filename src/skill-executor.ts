@@ -24,36 +24,55 @@ const MAX_TOOL_ITERATIONS = 8;
 // ============================================
 
 /**
- * 檢查使用者訊息是否匹配任何已啟用的技能。
- *
- * 匹配優先級：
- * 1. keyword — 訊息完全包含觸發關鍵字
- * 2. pattern — 訊息符合正則表達式
- * 3. always  — 永遠匹配（最低優先級）
- *
- * manual 和 cron 類型不由訊息觸發，會被跳過。
+ * 檢查使用者訊息是否匹配任何已啟用的技能（回傳第一個）。
+ * 供 scheduler 等只需單一技能的場景使用。
  */
 export function findMatchingSkill(
   text: string,
   skills: Skill[]
 ): Skill | null {
-  const enabledSkills = skills.filter((s) => s.enabled === 1);
-  if (enabledSkills.length === 0) return null;
+  const matched = findMatchingSkills(text, skills);
+  return matched.length > 0 ? matched[0] : null;
+}
 
+/**
+ * 檢查使用者訊息匹配的所有已啟用技能（支援 chaining）。
+ *
+ * 收集規則：
+ * 1. keyword — 收集所有關鍵字匹配的技能
+ * 2. pattern — 收集所有正則匹配的技能
+ * 3. always  — 僅在無其他匹配時才加入（最低優先級）
+ *
+ * manual 和 cron 類型不由訊息觸發，會被跳過。
+ */
+export function findMatchingSkills(
+  text: string,
+  skills: Skill[]
+): Skill[] {
+  const enabledSkills = skills.filter((s) => s.enabled === 1);
+  if (enabledSkills.length === 0) return [];
+
+  const matched: Skill[] = [];
+  const matchedIds = new Set<number>();
+
+  // keyword matches — 收集全部
   for (const skill of enabledSkills) {
     if (skill.trigger_type === 'keyword' && skill.trigger_value) {
-      if (text.includes(skill.trigger_value)) {
-        return skill;
+      if (text.includes(skill.trigger_value) && !matchedIds.has(skill.id)) {
+        matched.push(skill);
+        matchedIds.add(skill.id);
       }
     }
   }
 
+  // pattern matches — 收集全部
   for (const skill of enabledSkills) {
     if (skill.trigger_type === 'pattern' && skill.trigger_value) {
       try {
         const regex = new RegExp(skill.trigger_value, 'i');
-        if (regex.test(text)) {
-          return skill;
+        if (regex.test(text) && !matchedIds.has(skill.id)) {
+          matched.push(skill);
+          matchedIds.add(skill.id);
         }
       } catch {
         console.warn(
@@ -63,13 +82,84 @@ export function findMatchingSkill(
     }
   }
 
-  for (const skill of enabledSkills) {
-    if (skill.trigger_type === 'always') {
-      return skill;
+  // always — 僅在無其他匹配時
+  if (matched.length === 0) {
+    for (const skill of enabledSkills) {
+      if (skill.trigger_type === 'always') {
+        matched.push(skill);
+        break;
+      }
     }
   }
 
-  return null;
+  return matched;
+}
+
+// ============================================
+// Skill Chaining（Sequential Pipeline）
+// ============================================
+
+/** 前置技能的執行結果 */
+interface SkillResult {
+  skillName: string;
+  result: string;
+}
+
+/**
+ * 判斷技能是否有工具（API 或 MCP）
+ */
+function skillHasTools(skill: Skill): boolean {
+  const apiConfig = parseApiConfig(skill.api_config);
+  if (!apiConfig) return false;
+  if (apiConfig.base_url) return true;
+  if (apiConfig.mcp_servers && apiConfig.mcp_servers.length > 0) return true;
+  return false;
+}
+
+/**
+ * 排序技能的執行順序：有工具的先跑（取得資料），prompt-only 後跑（轉換資料）
+ */
+function sortSkillsForChaining(skills: Skill[]): Skill[] {
+  return [...skills].sort((a, b) => {
+    const aTools = skillHasTools(a);
+    const bTools = skillHasTools(b);
+    if (aTools && !bTools) return -1;
+    if (!aTools && bTools) return 1;
+    return 0;
+  });
+}
+
+/**
+ * 執行技能鏈（Sequential Pipeline）。
+ *
+ * 流程：
+ * 1. 排序：有工具的技能先跑（取得資料），prompt-only 技能後跑（轉換/加工）
+ * 2. 依序執行：前一個技能的輸出注入為下一個技能的 context
+ * 3. 回傳最後一個技能的輸出
+ *
+ * 若只匹配到一個技能，等同直接 executeSkill。
+ */
+export async function executeSkillChain(
+  skills: Skill[],
+  userId: number,
+  userMessage: string
+): Promise<string> {
+  if (skills.length === 0) return '';
+  if (skills.length === 1) return executeSkill(skills[0], userId, userMessage);
+
+  const sorted = sortSkillsForChaining(skills);
+  console.log(
+    `[skill-executor] Skill chaining: ${sorted.map((s) => `「${s.name}」`).join(' → ')}`
+  );
+
+  const previousResults: SkillResult[] = [];
+
+  for (const skill of sorted) {
+    const result = await executeSkill(skill, userId, userMessage, previousResults);
+    previousResults.push({ skillName: skill.name, result });
+  }
+
+  return previousResults[previousResults.length - 1].result;
 }
 
 // ============================================
@@ -86,11 +176,14 @@ export function findMatchingSkill(
  * 4. AI 讀取技能 prompt（SKILL.md 內容），自行決定呼叫哪個 API
  * 5. Tool Calling Loop：AI 用 api_call(method, path, body) 呼叫 API
  * 6. 回傳最終回覆
+ *
+ * @param previousResults — chaining 時前置技能的結果，會注入 system prompt
  */
 export async function executeSkill(
   skill: Skill,
   userId: number,
-  userMessage: string
+  userMessage: string,
+  previousResults?: SkillResult[]
 ): Promise<string> {
   try {
     const memory = getUserMemory(userId);
@@ -135,13 +228,13 @@ export async function executeSkill(
     }
 
     const hasTools = toolDefs.length > 0;
-    const systemPrompt = buildSkillSystemPrompt(skill, memory, hasTools, credentialService);
+    const systemPrompt = buildSkillSystemPrompt(skill, memory, hasTools, credentialService, previousResults);
     const messages: ChatMessage[] = [{ role: 'user', content: userMessage }];
 
     // prompt-only 技能靠 LLM 文字生成能力，需要較好的模型；有工具的技能用便宜模型即可
     const complexity = hasTools ? 'simple' : 'complex';
-    // prompt-only 技能需要較多輸出空間（如產生報告，中文每字約 2-3 tokens），有工具的技能 1024 已足夠
-    const maxTokens = hasTools ? 1024 : 4096;
+    // 統一 4096：Telegram 單則上限 4096 字元，LLM 4096 tokens ≈ 1500-2000 中文字，不會超出
+    const maxTokens = 4096;
 
     // 第一次呼叫 chat — 有工具時強制使用，防止 AI 造假資料
     let response = await chat({
@@ -244,7 +337,8 @@ function buildSkillSystemPrompt(
   skill: Skill,
   memory: string,
   hasTools: boolean,
-  credentialService?: string
+  credentialService?: string,
+  previousResults?: SkillResult[]
 ): string {
   const parts: string[] = [];
 
@@ -252,6 +346,19 @@ function buildSkillSystemPrompt(
   parts.push('');
   parts.push('## 技能指令');
   parts.push(skill.prompt);
+
+  // Chaining：注入前置技能的結果
+  if (previousResults && previousResults.length > 0) {
+    parts.push('');
+    parts.push('## 前置技能已取得的資料');
+    parts.push('以下是之前執行的技能已取得的真實資料，請基於這些資料完成你的任務。');
+    parts.push('注意：前置技能的輸出可能包含工具呼叫過程的描述文字（例如「Attempt to...」「Let me...」等），請忽略這些過程描述，只使用實質內容。你的回覆中也不要包含這些過程描述。');
+    for (const prev of previousResults) {
+      parts.push('');
+      parts.push(`### 技能「${prev.skillName}」的輸出：`);
+      parts.push(prev.result);
+    }
+  }
 
   if (memory && memory.trim()) {
     parts.push('');
@@ -271,14 +378,20 @@ function buildSkillSystemPrompt(
   parts.push('- 絕對不可以編造、虛構或猜測任何數據、數字、名稱、狀態等事實性資訊');
   parts.push('- 如果你無法取得真實資料，必須誠實告知使用者「目前無法取得資料」，不要用假資料充數');
 
+  const hasPreviousData = previousResults && previousResults.length > 0;
+
   if (hasTools) {
     parts.push('- 必須使用提供的工具取得真實數據，不可自行編造');
     parts.push('- 如果工具回傳錯誤，如實告知使用者錯誤內容，不要試圖猜測或編造替代資料');
     if (credentialService) {
       parts.push(`- 如果用戶尚未設定帳密，使用 set_${credentialService}_credentials 工具引導用戶提供帳號密碼`);
     }
+  } else if (hasPreviousData) {
+    // Chaining：前置技能已取得資料，此技能負責加工/轉換
+    parts.push('- 上方「前置技能已取得的資料」是真實資料，請直接基於這些資料完成你的任務');
+    parts.push('- 不需要額外工具，專注在資料的分析、整理和呈現');
   } else {
-    // 無工具的技能 — 明確告知 AI 它沒有 API 存取能力
+    // 無工具且無前置資料 — 明確告知 AI 它沒有 API 存取能力
     parts.push('- 你目前沒有任何工具可以呼叫外部 API 或取得即時資料');
     parts.push('- 如果使用者詢問需要即時數據的問題（如查詢、搜尋），請告知他們此技能尚未連接 API，無法提供即時資料');
     parts.push('- 你只能根據技能指令中的知識回答，不要假裝有查詢結果');

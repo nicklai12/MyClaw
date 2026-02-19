@@ -6,6 +6,7 @@
 
 - **自然語言建立技能** — 說「每天早上 8 點提醒我喝水」，AI 自動建立排程技能
 - **技能觸發與執行** — 關鍵字、正則、定時排程、手動觸發
+- **Skill Chaining** — 多技能自動串接，有工具的技能先取得資料，prompt-only 技能後加工（例如 Playwright 抓網頁 → 數據故事敘述產出報告）
 - **外部 API 串接** — 技能可綁定外部 API，AI 動態產生工具並自動呼叫（支援 bearer token / API key 認證）
 - **MCP 工具整合** — 透過 [Model Context Protocol](https://modelcontextprotocol.io/) 連接外部工具伺服器（瀏覽器自動化、檔案系統等），技能可直接呼叫 MCP 工具
 - **匯入公開技能** — 貼上 GitHub URL，AI 自動轉換並安裝（支援 Anthropic Agent Skills / OpenAI Codex Skills 格式）
@@ -103,7 +104,7 @@ src/
 ├── telegram-channel.ts   # Telegram 平台實作
 ├── skill-manager.ts      # 技能建立與管理
 ├── skill-importer.ts     # GitHub URL 匯入 + 技能目錄 + AI 提取 api_config
-├── skill-executor.ts     # 技能觸發與動態工具呼叫執行
+├── skill-executor.ts     # 技能觸發 + Skill Chaining Pipeline + 動態工具呼叫執行
 ├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立工具定義
 ├── http-executor.ts      # 通用 HTTP 執行器 + token 快取
 ├── mcp-client.ts         # MCP Client 連線管理 + 工具路由
@@ -133,6 +134,25 @@ npm run typecheck  # 型別檢查
 | 資料庫 | SQLite (better-sqlite3) |
 | 排程 | node-cron |
 | 語言 | TypeScript 5.x |
+
+## Skill Chaining（技能串接）
+
+當使用者的訊息同時匹配多個技能的關鍵字時，系統自動依序執行所有匹配的技能，形成 pipeline：
+
+```
+使用者：「請用 playwright 彙總網頁 ... 做成一份報告」
+         ↓ 匹配到 "playwright"（總結網頁）+ "報告"（數據故事敘述）
+
+Skill chaining: 「總結網頁」→「數據故事敘述」
+
+1. 總結網頁（有 MCP 工具）→ Playwright 抓取頁面 → 產出摘要
+2. 數據故事敘述（prompt-only）→ 收到摘要作為 context → 轉成敘事報告
+3. 最終報告回傳給使用者
+```
+
+**執行順序規則**：有工具的技能（API / MCP）先跑（取得資料），prompt-only 技能後跑（轉換/加工）。前一個技能的輸出會注入下一個技能的 system prompt。
+
+若只匹配到一個技能，行為與原本相同。
 
 ## MCP 工具整合
 

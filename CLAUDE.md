@@ -36,7 +36,7 @@ src/
 ├── telegram-channel.ts   # Telegram 平台實作 (TelegramChannel)
 ├── skill-manager.ts      # 技能建立 + 管理 (自然語言 → JSON)
 ├── skill-importer.ts     # GitHub URL 匯入 + 公開技能目錄瀏覽 + AI 提取 api_config
-├── skill-executor.ts     # 技能觸發判斷 + 動態工具呼叫執行
+├── skill-executor.ts     # 技能觸發判斷 + Skill Chaining Pipeline + 動態工具呼叫執行
 ├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立 ToolDefinition[]
 ├── http-executor.ts      # 通用 HTTP 執行器 + bearer token 快取
 ├── mcp-client.ts         # MCP Client Manager（全域 MCP Server 連線管理）
@@ -57,7 +57,7 @@ src/
 | `telegram-channel.ts` | Telegram 平台 MessageChannel 實作、原生 fetch API、訊息編輯 | channel |
 | `skill-manager.ts` | 解析自然語言意圖、生成技能 JSON、CRUD 技能 | llm, db |
 | `skill-importer.ts` | 解析 GitHub URL、fetch SKILL.md、AI 格式轉換、安全檢查、技能目錄瀏覽、AI 提取 api_config | llm, db, skill-manager |
-| `skill-executor.ts` | 關鍵字/模式/cron 觸發判斷、動態工具呼叫迴圈（max 5 次）、執行技能 prompt | llm, db, memory, dynamic-tool-builder, http-executor |
+| `skill-executor.ts` | 關鍵字/模式/cron 觸發判斷、Skill Chaining Pipeline（多技能依序執行）、動態工具呼叫迴圈（max 8 次）、執行技能 prompt | llm, db, memory, dynamic-tool-builder, http-executor, mcp-client |
 | `dynamic-tool-builder.ts` | 從 ApiConfig 動態建立 ToolDefinition[]（api_call 通用工具） | config |
 | `http-executor.ts` | 通用 HTTP 執行器、bearer token 自動登入與快取、api_key 注入 | config, db |
 | `mcp-client.ts` | MCP Client Manager：全域 MCP Server 連線、工具列表快取、工具呼叫路由 | config |
@@ -194,7 +194,7 @@ scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, ena
 - Tool Calling：業界頂級，參數提取精確
 - Prompt Caching：啟用可節省 50-80% input 費用（system prompt + 歷史對話快取）
 - Rate Limit：Tier 1 ($5 儲值) 即有 50 RPM，個人使用綽綽有餘
-- 建議設定 `max_tokens: 1024` 避免冗長回覆
+- 技能執行統一 `max_tokens: 4096`（Telegram 單則上限 4096 字元，4096 tokens ≈ 1500-2000 中文字）
 - 回應速度比 Groq 慢 3-5 倍，超過 5 秒的任務建議先回「思考中...」
 
 ### Cerebras Cloud API (Cerebras-only / 混合模式)
@@ -250,6 +250,52 @@ MessageChannel (channel.ts) — 抽象介面
 - 訊息可編輯：技能執行時先發「思考中...」再 `editMessageText` 為最終結果
 - 完全免費，無訊息數限制
 - 設定 `WEBHOOK_BASE_URL` 啟動時自動註冊 webhook
+
+## Skill Chaining（Sequential Pipeline）
+
+當使用者的訊息同時匹配多個技能時，系統會依序執行所有匹配的技能，形成 pipeline。
+
+### 運作流程
+
+```
+使用者訊息 → findMatchingSkills() 收集所有匹配技能
+                    ↓
+           sortSkillsForChaining() 排序
+           （有工具的先跑，prompt-only 後跑）
+                    ↓
+           executeSkillChain() 依序執行
+           前一個技能的輸出 → 注入下一個技能的 system prompt
+                    ↓
+           回傳最後一個技能的輸出
+```
+
+### 範例
+
+```
+使用者：「請用 playwright 彙總網頁 ... 做成一份報告」
+         ↓ 匹配到 "playwright" + "報告"
+
+Skill chaining: 「總結網頁」→「數據故事敘述」
+
+1. 總結網頁（有 MCP 工具）→ Playwright 抓頁面 → 產出摘要
+2. 數據故事敘述（prompt-only）→ 收到摘要 context → 轉成敘事報告
+3. 最終報告回傳給使用者
+```
+
+### 關鍵函式
+
+| 函式 | 職責 |
+|------|------|
+| `findMatchingSkills()` | 收集所有匹配技能（keyword + pattern 全部收集，always 僅在無其他匹配時） |
+| `sortSkillsForChaining()` | 排序：有工具（API/MCP）的先跑，prompt-only 後跑 |
+| `executeSkillChain()` | Pipeline 主邏輯，單一技能時等同 `executeSkill()` |
+| `findMatchingSkill()` | 向下相容，回傳第一個匹配（供 scheduler 使用） |
+
+### System Prompt 注入規則
+
+- **有工具的技能**：指示 AI 必須使用工具取得真實數據
+- **prompt-only + 有前置資料**：指示 AI 基於前置技能的真實資料完成任務
+- **prompt-only + 無前置資料**：指示 AI 誠實告知無法取得即時資料
 
 ## Skill 匯入要點
 

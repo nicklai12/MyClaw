@@ -9,7 +9,7 @@ import { initLLM, chat, getProviderInfo } from './llm';
 import { initDB, getOrCreateUser, saveMessage, getRecentMessages, getEnabledSkills, getUserSkills, createSkill, findSkillBySourceUrl, updateSkill } from './db';
 import { getUserMemory, updateMemory, buildMemoryUpdatePrompt } from './memory';
 import { isSkillManagementIntent, handleSkillManagement } from './skill-manager';
-import { findMatchingSkill, executeSkill } from './skill-executor';
+import { findMatchingSkills, executeSkillChain } from './skill-executor';
 import { isSkillImportIntent, importSkillFromURL } from './skill-importer';
 import { initScheduler } from './scheduler';
 import { initMcpClients, shutdownMcpClients, getConnectedServerNames, getAllMcpTools } from './mcp-client';
@@ -130,18 +130,21 @@ async function handleIncomingMessage(incoming: IncomingMessage): Promise<void> {
       }
     }
 
-    // 5. 技能匹配 → 執行
+    // 5. 技能匹配 → 執行（支援 chaining：多技能依序執行）
     const enabledSkills = getEnabledSkills(user.id);
-    const matchedSkill = findMatchingSkill(incoming.text, enabledSkills);
-    if (matchedSkill) {
+    const matchedSkills = findMatchingSkills(incoming.text, enabledSkills);
+    if (matchedSkills.length > 0) {
       try {
         // Telegram：先發「思考中...」再編輯為最終結果
         let thinkingMsgId: string | number | undefined;
         if (incoming.platform === 'telegram' && channel.sendAndGetId) {
-          thinkingMsgId = await channel.sendAndGetId(incoming.platformUserId, '思考中...');
+          const label = matchedSkills.length > 1
+            ? `執行中（${matchedSkills.map((s) => s.name).join(' → ')}）...`
+            : '思考中...';
+          thinkingMsgId = await channel.sendAndGetId(incoming.platformUserId, label);
         }
 
-        const skillResult = await executeSkill(matchedSkill, user.id, incoming.text);
+        const skillResult = await executeSkillChain(matchedSkills, user.id, incoming.text);
 
         if (thinkingMsgId && channel.editMessage) {
           await channel.editMessage(incoming.platformUserId, thinkingMsgId, skillResult);
