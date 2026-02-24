@@ -986,3 +986,71 @@ MyClaw Server (Express.js)
 - 預建「網頁截圖」「資料擷取」等技能範本
 - LINE/Telegram 圖片訊息回傳支援
 - Playwright MCP Server Docker 化部署
+
+---
+
+### 21. Tavily MCP Server 整合研究（2026-02-24）
+
+> 研究資料：`research/21-tavily-mcp-integration/`
+
+#### 21a. 研究結論：✅ 可整合，改動極小
+
+| 項目 | 結論 |
+|------|------|
+| **可行性** | ✅ 完全可行，已實測成功 |
+| **Transport** | Tavily Remote MCP 使用 **Streamable HTTP**（MCP 規範 2025-03-26） |
+| **SDK 相容** | `@modelcontextprotocol/sdk@1.26.0` 已內建 `StreamableHTTPClientTransport`，**無需升級** |
+| **改動範圍** | 僅 2 個檔案（`config.ts` + `mcp-client.ts`），約 15 行 |
+| **向下相容** | 完全相容，不影響現有 stdio/sse 連線 |
+| **認證方式** | API Key 透過 URL query parameter（`?tavilyApiKey=xxx`） |
+| **免費額度** | 每月 1,000 次 API 呼叫 |
+
+#### 21b. Tavily MCP 提供 5 個工具
+
+| 工具名稱 | 功能 | 必要參數 | 測試耗時 |
+|----------|------|----------|----------|
+| `tavily_search` | 即時網路搜尋 | `query` (string) | ~1 秒 |
+| `tavily_extract` | 網頁內容擷取（Markdown） | `urls` (string[]) | ~0.3 秒 |
+| `tavily_crawl` | 網站爬取 | `url` (string) | 未測 |
+| `tavily_map` | 網站結構對映 | `url` (string) | 未測 |
+| `tavily_research` | 綜合深度研究 | `input` (string) | 未測（預估 30-120s） |
+
+注意：工具名稱使用**底線**（`tavily_search`），不是連字號。MyClaw 前綴機制 `mcp__tavily__tavily_search` 正常運作。
+
+#### 21c. 實作方案
+
+**Step 1：`config.ts` — 擴充 McpServerConfig**
+```typescript
+export interface McpServerConfig {
+  name: string;
+  transport:
+    | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+    | { type: 'sse'; url: string; headers?: Record<string, string> }
+    | { type: 'streamable-http'; url: string; headers?: Record<string, string> };  // 新增
+}
+```
+
+**Step 2：`mcp-client.ts` — 新增 StreamableHTTPClientTransport**
+```typescript
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+// connectServer() 新增分支：
+} else if (config.transport.type === 'streamable-http') {
+  transport = new StreamableHTTPClientTransport(new URL(config.transport.url));
+}
+```
+
+**Step 3：環境變數配置**
+```env
+MCP_SERVERS='[{"name":"tavily","transport":{"type":"streamable-http","url":"https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-dev-xxx"}}]'
+```
+
+**Step 4：技能建立**
+建立使用 Tavily 的技能，`api_config.mcp_servers: ["tavily"]` 即可。
+
+#### 21d. 注意事項
+
+- `tavily_extract` 結果可能很長（7000+ 字元），現有 3000 字元截斷機制會生效，未來可考慮調整
+- `tavily_research` 可能耗時 30-120 秒，建議搭配 Telegram `editMessage` UX 模式
+- API Key 內嵌於 URL，不會存入 DB，透過 `MCP_SERVERS` 環境變數管理
+- Streamable HTTP 支援 session（`Mcp-Session-Id`），SDK 自動處理

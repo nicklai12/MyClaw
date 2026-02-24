@@ -7,6 +7,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js';
 import type { ToolDefinition, ToolCall, McpServerConfig } from './config';
 
@@ -16,7 +17,7 @@ import type { ToolDefinition, ToolCall, McpServerConfig } from './config';
 
 interface ConnectedServer {
   client: Client;
-  transport: StdioClientTransport | SSEClientTransport;
+  transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport;
   tools: ToolDefinition[];
   name: string;
 }
@@ -60,7 +61,7 @@ async function connectServer(config: McpServerConfig): Promise<void> {
     { capabilities: {} }
   );
 
-  let transport: StdioClientTransport | SSEClientTransport;
+  let transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport;
 
   if (config.transport.type === 'stdio') {
     transport = new StdioClientTransport({
@@ -70,6 +71,8 @@ async function connectServer(config: McpServerConfig): Promise<void> {
     });
   } else if (config.transport.type === 'sse') {
     transport = new SSEClientTransport(new URL(config.transport.url));
+  } else if (config.transport.type === 'streamable-http') {
+    transport = new StreamableHTTPClientTransport(new URL(config.transport.url));
   } else {
     throw new Error(`[mcp] 不支援的 transport 類型: ${(config.transport as { type: string }).type}`);
   }

@@ -8,7 +8,8 @@ export interface McpServerConfig {
   name: string;
   transport:
     | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
-    | { type: 'sse'; url: string; headers?: Record<string, string> };
+    | { type: 'sse'; url: string; headers?: Record<string, string> }
+    | { type: 'streamable-http'; url: string; headers?: Record<string, string> };
 }
 
 export interface AppConfig {
