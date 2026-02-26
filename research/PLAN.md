@@ -297,6 +297,7 @@ research/
 │   ├── mcp-protocol-research.md         # MCP 協議規格與 SDK 生態
 │   ├── mcp-integration-analysis.md      # MyClaw 架構與 MCP 整合點分析
 │   └── mcp-chrome-devtools-research.md  # Chrome DevTools MCP Server 研究
+├── 22-cloud-browser-services/           # 雲端瀏覽器服務（Browserless vs BrowserBase）
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```
@@ -1054,3 +1055,113 @@ MCP_SERVERS='[{"name":"tavily","transport":{"type":"streamable-http","url":"http
 - `tavily_research` 可能耗時 30-120 秒，建議搭配 Telegram `editMessage` UX 模式
 - API Key 內嵌於 URL，不會存入 DB，透過 `MCP_SERVERS` 環境變數管理
 - Streamable HTTP 支援 session（`Mcp-Session-Id`），SDK 自動處理
+
+---
+
+### 22. 雲端瀏覽器服務研究（2026-02-26）
+
+> 完整報告：`research/22-cloud-browser-services/README.md`
+
+#### 22a. 研究結論：推薦 Browserless，零程式碼改動
+
+| 項目 | Browserless | BrowserBase |
+|------|-------------|-------------|
+| **免費額度** | 1,000 units/月（~33 次/天） | 1 小時/月（~4 次/天） |
+| **連線方式** | 直接 WebSocket（stateless） | 需先建立 Session（stateful） |
+| **Playwright MCP 相容** | 原生 `--cdp-endpoint` | 需額外 SDK + Session 管理 |
+| **程式碼改動** | 零（僅改環境變數） | 需修改 mcp-client.ts + 新增依賴 |
+| **併發數（免費）** | 10 | 1 |
+| **額外功能** | 免費含 CAPTCHA solving | 免費不含 Stealth Mode |
+
+#### 22b. 實施方式（Browserless）
+
+只需修改 `MCP_SERVERS` 環境變數，從 stdio 本地啟動改為 CDP 連線：
+
+```env
+# 舊（本地 Chromium，Render 不可用）
+MCP_SERVERS=[{"name":"browser","transport":{"type":"stdio","command":"npx","args":["@playwright/mcp@latest","--headless","--isolated"]}}]
+
+# 新（Browserless 雲端瀏覽器）
+MCP_SERVERS=[{"name":"browser","transport":{"type":"stdio","command":"npx","args":["@playwright/mcp@latest","--cdp-endpoint","wss://production-sfo.browserless.io?token=YOUR_TOKEN"]}}]
+```
+
+**CDP Endpoint 格式**：`wss://production-sfo.browserless.io?token=YOUR_TOKEN`
+
+**關鍵優勢**：Playwright MCP 仍以 stdio transport 啟動，但內部透過 `--cdp-endpoint` 連接遠端瀏覽器，MyClaw 的 `mcp-client.ts` 完全不需修改。
+
+#### 22c. 不推薦 BrowserBase 的理由
+
+1. 免費額度太少（1 小時/月），個人使用大概率需付費 $20/月
+2. 需先透過 REST API 建立 Session 才能取得 CDP URL，增加程式碼複雜度
+3. 15 分鐘 Session 限制，需處理過期重建邏輯
+4. 需安裝 `@browserbasehq/sdk` 額外依賴
+
+---
+
+### 23. AI 代碼生成工作流研究（2026-02-26）
+
+> 完整報告：`research/23-ai-code-generation-workflow/README.md`
+
+#### 23a. 研究結論：分階段實施，從 SQLite 存儲開始
+
+**核心問題**：使用者想讓 AI（Kimi K2）寫程式碼，但代碼的保存、測試、部署、GitHub 整合需要規劃。
+
+#### 23b. 代碼保存方案
+
+| 方案 | 推薦度 | 說明 |
+|------|--------|------|
+| **SQLite code_snippets** | **MVP 首選** | skills 表新增欄位，零額外依賴 |
+| **GitHub MCP Server** | **中期目標** | 透過現有 MCP Client Manager 接入，支援 push_files / create_PR |
+| GitHub Gist | 補充方案 | 適合代碼片段分享 |
+| 本地檔案系統 | 不推薦 | Render ephemeral storage，重新部署即消失 |
+
+#### 23c. 代碼執行方案
+
+| 方案 | 推薦度 | 說明 |
+|------|--------|------|
+| **不執行（回傳文字）** | **最小 MVP** | 零安全風險、零成本 |
+| **E2B 雲端沙箱** | **MVP 首選** | 毫秒級啟動、完整 Linux microVM、$100 免費 credit |
+| Daytona | 進階方案 | 開源、可自建，但複雜度高 |
+| Modal | ML 專用 | $30/月 credit，適合 Python ML 工作流 |
+| Docker-in-Docker | 不適合 Render | Render 不支援 DinD |
+
+#### 23d. GitHub 整合方案
+
+**推薦 GitHub MCP Server**：MyClaw 已有 MCP Client Manager，只需在 `MCP_SERVERS` 環境變數加入配置即可。
+
+GitHub MCP Server 提供的關鍵工具：
+- `push_files`：一次推送多檔案（單 commit）
+- `create_branch`：建立新分支
+- `create_pull_request`：建立 PR
+- `create_or_update_file`：建立/更新單檔
+
+配置方式：
+```json
+{"name":"github","transport":{"type":"stdio","command":"npx","args":["-y","@github/mcp-server"],"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"ghp_xxx"}}}
+```
+
+#### 23e. 業界參考
+
+| 工具 | 代碼寫入 | 執行環境 | 版本控制 | 定位 |
+|------|----------|----------|----------|------|
+| Claude Code | 本地檔案 + OS 沙箱 | 本地 bash | 本地 git | 終端 AI 助手 |
+| OpenHands | Docker 沙箱 | Docker 容器 | 沙箱內 git | AI 開發平台 |
+| Replit Agent | 雲端工作區 | Replit 容器 | Replit git | 雲端 IDE |
+| **MyClaw** | **SQLite + GitHub** | **E2B 沙箱** | **GitHub MCP** | **聊天機器人助手** |
+
+#### 23f. 漸進式升級路線
+
+```
+Phase 1（MVP）→ AI 生成代碼 → 存 SQLite → 回傳文字（~80 行，$0）
+Phase 2（GitHub）→ GitHub MCP push_files / create_PR（~30 行，$0）
+Phase 3（執行）→ E2B 雲端沙箱（~100 行，$0-5/月）
+Phase 4（進階）→ 版本歷史 + 自動修復迴圈 + Gist 分享
+```
+
+#### 23g. 核心建議
+
+1. **從最簡單開始**：Phase 1 只需 ~80 行代碼，0 成本
+2. **善用現有架構**：GitHub MCP Server 透過 MCP Client Manager 接入，零新架構概念
+3. **安全第一**：代碼執行必須在沙箱中，E2B 是個人專案最佳選擇
+4. **不要過度設計**：MyClaw 是聊天機器人，代碼生成是輔助功能
+5. **漸進式升級**：先存、再推、後執行，每個階段獨立可交付
