@@ -19,7 +19,7 @@ Telegram ──→   /webhook/line           ├── Claude-only：只有 ANTH
                                        └── 混合模式：>=2 個 API Key
                                             └── 簡單→Groq/Cerebras, 複雜→Claude
 SQLite (better-sqlite3) + node-cron
-15 個源碼檔案
+16 個源碼檔案
 ```
 
 ## 目錄結構
@@ -37,7 +37,8 @@ src/
 ├── skill-manager.ts      # 技能建立 + 管理 (自然語言 → JSON)
 ├── skill-importer.ts     # GitHub URL 匯入 + 公開技能目錄瀏覽 + AI 提取 api_config
 ├── skill-executor.ts     # 技能觸發判斷 + Skill Chaining Pipeline + 動態工具呼叫執行
-├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立 ToolDefinition[]
+├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立 ToolDefinition[] + 內建工具註冊表
+├── builtin-executor.ts   # 內建工具執行器（代碼生成/列表/取得）
 ├── http-executor.ts      # 通用 HTTP 執行器 + bearer token 快取
 ├── mcp-client.ts         # MCP Client Manager（全域 MCP Server 連線管理）
 └── scheduler.ts          # node-cron 排程任務（多平台推送）
@@ -58,7 +59,8 @@ src/
 | `skill-manager.ts` | 解析自然語言意圖、生成技能 JSON、CRUD 技能 | llm, db |
 | `skill-importer.ts` | 解析 GitHub URL、fetch SKILL.md、AI 格式轉換、安全檢查、技能目錄瀏覽、AI 提取 api_config | llm, db, skill-manager |
 | `skill-executor.ts` | 關鍵字/模式/cron 觸發判斷、Skill Chaining Pipeline（多技能依序執行）、動態工具呼叫迴圈（max 8 次）、執行技能 prompt | llm, db, memory, dynamic-tool-builder, http-executor, mcp-client |
-| `dynamic-tool-builder.ts` | 從 ApiConfig 動態建立 ToolDefinition[]（api_call 通用工具） | config |
+| `dynamic-tool-builder.ts` | 從 ApiConfig 動態建立 ToolDefinition[]（api_call 通用工具）+ 內建工具註冊表 | config |
+| `builtin-executor.ts` | 內建工具執行器：save_code / list_code / get_code 路由與執行 | db |
 | `http-executor.ts` | 通用 HTTP 執行器、bearer token 自動登入與快取、api_key 注入 | config, db |
 | `mcp-client.ts` | MCP Client Manager：全域 MCP Server 連線、工具列表快取、工具呼叫路由 | config |
 | `scheduler.ts` | node-cron 排程、定時技能觸發、多平台推送 | db, skill-executor, channel |

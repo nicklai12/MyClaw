@@ -225,6 +225,7 @@ export interface ApiConfig {
   };
   mcp_servers?: string[];  // 技能要使用的 MCP server 名稱列表
   mcp_tool_filter?: string[];  // 只使用這些 MCP 工具（白名單，不含前綴）
+  builtin_tools?: string[];  // 內建工具列表，如 ['save_code', 'list_code', 'get_code']
 }
 
 export interface Message {
@@ -243,6 +244,17 @@ export interface ScheduledTask {
   next_run: string;
   last_run: string;
   enabled: number;
+}
+
+export interface CodeSnippet {
+  id: number;
+  user_id: number;
+  title: string;
+  language: string;
+  code: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // ============================================

@@ -79,6 +79,59 @@ export function buildGenericTools(apiConfig: ApiConfig, needsCredentialTool: boo
   return tools;
 }
 
+// ============================================
+// 內建工具註冊表
+// ============================================
+
+const BUILTIN_TOOL_REGISTRY: Record<string, ToolDefinition> = {
+  save_code: {
+    name: 'builtin__save_code',
+    description: '儲存代碼片段到使用者的代碼庫。AI 生成代碼後呼叫此工具存儲。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '代碼標題' },
+        language: { type: 'string', description: '程式語言 (typescript, python, etc.)' },
+        code: { type: 'string', description: '完整代碼內容' },
+        description: { type: 'string', description: '代碼說明' },
+      },
+      required: ['title', 'language', 'code'],
+    },
+  },
+  list_code: {
+    name: 'builtin__list_code',
+    description: '列出使用者儲存的所有代碼片段。',
+    input_schema: { type: 'object', properties: {} },
+  },
+  get_code: {
+    name: 'builtin__get_code',
+    description: '取得特定代碼片段的完整內容。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        snippet_id: { type: 'number', description: '代碼片段 ID' },
+      },
+      required: ['snippet_id'],
+    },
+  },
+};
+
+/**
+ * 從內建工具註冊表中取出指定工具定義
+ */
+export function buildBuiltinTools(builtinNames: string[]): ToolDefinition[] {
+  const tools: ToolDefinition[] = [];
+  for (const name of builtinNames) {
+    const tool = BUILTIN_TOOL_REGISTRY[name];
+    if (tool) {
+      tools.push(tool);
+    } else {
+      console.warn(`[dynamic-tool-builder] 未知的內建工具: ${name}`);
+    }
+  }
+  return tools;
+}
+
 /**
  * 解析技能的 api_config JSON 字串為 ApiConfig 物件
  */
@@ -91,8 +144,10 @@ export function parseApiConfig(apiConfigJson: string): ApiConfig | null {
     const config = JSON.parse(apiConfigJson) as ApiConfig;
     // MCP-only 技能不需要 base_url，只需要 mcp_servers
     const hasMcp = config.mcp_servers && config.mcp_servers.length > 0;
-    if (!hasMcp && (!config.base_url || !config.auth)) {
-      console.warn('[dynamic-tool-builder] api_config 缺少必要欄位 (base_url, auth)');
+    // builtin_tools-only 技能不需要 base_url 或 mcp_servers
+    const hasBuiltin = config.builtin_tools && config.builtin_tools.length > 0;
+    if (!hasMcp && !hasBuiltin && (!config.base_url || !config.auth)) {
+      console.warn('[dynamic-tool-builder] api_config 缺少必要欄位 (base_url, auth, mcp_servers, or builtin_tools)');
       return null;
     }
     // 確保 auth 至少有預設值

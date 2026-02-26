@@ -9,6 +9,7 @@
 - **Skill Chaining** — 多技能自動串接，有工具的技能先取得資料，prompt-only 技能後加工（例如 Playwright 抓網頁 → 數據故事敘述產出報告）
 - **外部 API 串接** — 技能可綁定外部 API，AI 動態產生工具並自動呼叫（支援 bearer token / API key 認證）
 - **MCP 工具整合** — 透過 [Model Context Protocol](https://modelcontextprotocol.io/) 連接外部工具伺服器（瀏覽器自動化、檔案系統等），技能可直接呼叫 MCP 工具
+- **AI 代碼生成** — 在對話中請 AI 寫程式碼，自動存入 SQLite，搭配 GitHub MCP 可直接推送到 repo
 - **匯入公開技能** — 貼上 GitHub URL，AI 自動轉換並安裝（支援 Anthropic Agent Skills / OpenAI Codex Skills 格式）
 - **技能目錄瀏覽** — 在對話中瀏覽並一鍵安裝熱門技能
 - **使用者記憶** — AI 自動記住你的偏好、習慣和重要資訊
@@ -72,11 +73,16 @@ CEREBRAS_API_KEY=            # Cerebras Cloud（免費）
 # 選填 — 模型切換
 CLAUDE_DEFAULT_MODEL=claude-haiku-4-5-20250501    # Claude 主力模型
 CLAUDE_COMPLEX_MODEL=claude-sonnet-4-5-20250514   # Claude 複雜任務模型
-GROQ_MODEL=qwen/qwen3-32b                        # Groq 模型
+GROQ_MODEL=moonshotai/kimi-k2-instruct-0905      # Groq 模型（推薦，Tool Calling 最強）
 CEREBRAS_MODEL=gpt-oss-120b                       # Cerebras 模型
 
 # 選填 — MCP 工具伺服器
-# MCP_SERVERS='[{"name":"browser","transport":{"type":"stdio","command":"npx","args":["@playwright/mcp@latest","--headless","--isolated"]}}]'
+# Playwright 瀏覽器（二擇一）：
+#   本地模式（開發用）：--headless --isolated
+#   雲端模式（Render 等部署環境）：--cdp-endpoint wss://production-sfo.browserless.io?token=YOUR_TOKEN
+# Tavily 搜尋/擷取：streamable-http transport
+# GitHub（代碼推送，需 Personal Access Token，repo 權限）
+# MCP_SERVERS='[{"name":"tavily","transport":{"type":"streamable-http","url":"https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_KEY"}},{"name":"browser","transport":{"type":"stdio","command":"npx","args":["@playwright/mcp@latest","--cdp-endpoint","wss://production-sfo.browserless.io?token=YOUR_TOKEN"]}},{"name":"github","transport":{"type":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-github"],"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"YOUR_GITHUB_TOKEN"}}}]'
 
 # 選填 — 其他
 PORT=3000                    # HTTP port
@@ -86,7 +92,7 @@ WEBHOOK_BASE_URL=            # Telegram webhook 自動註冊（如 https://yourd
 | 配置方式 | 模式 | 月費估算 |
 |----------|------|---------|
 | 只填 `ANTHROPIC_API_KEY` | Claude-only（Haiku 4.5 為主） | $1-12 |
-| 只填 `GROQ_API_KEY` | Groq-only（Qwen3 32B） | $0 |
+| 只填 `GROQ_API_KEY` | Groq-only（Kimi K2） | $0 |
 | 只填 `CEREBRAS_API_KEY` | Cerebras-only（GPT-OSS 120B） | $0 |
 | 填 >=2 個 LLM Key | 混合模式（tool calling→Groq，報告生成→Cerebras，複雜→Claude） | $0-3 |
 
@@ -105,7 +111,8 @@ src/
 ├── skill-manager.ts      # 技能建立與管理
 ├── skill-importer.ts     # GitHub URL 匯入 + 技能目錄 + AI 提取 api_config
 ├── skill-executor.ts     # 技能觸發 + Skill Chaining Pipeline + 動態工具呼叫執行
-├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立工具定義
+├── dynamic-tool-builder.ts # 從 ApiConfig 動態建立工具定義 + 內建工具註冊表
+├── builtin-executor.ts   # 內建工具執行器（代碼生成/列表/取得）
 ├── http-executor.ts      # 通用 HTTP 執行器 + token 快取
 ├── mcp-client.ts         # MCP Client 連線管理 + 工具路由
 ├── test-mcp-server.ts    # 測試用 MCP Server（3 個範例工具）
@@ -139,8 +146,8 @@ lsof -ti :3000 | xargs kill -9
 | HTTP | Express.js |
 | LINE SDK | @line/bot-sdk |
 | Telegram | 原生 fetch API（無額外依賴） |
-| AI | Claude API (Haiku 4.5 / Sonnet 4.5 等) + Groq API (Qwen3 32B / Kimi K2 等 7 款) + Cerebras Cloud (GPT-OSS 120B 等 3 款) |
-| MCP | @modelcontextprotocol/sdk（支援 stdio / SSE transport） |
+| AI | Claude API (Haiku 4.5 / Sonnet 4.5 等) + Groq API (Kimi K2 / Qwen3 32B 等 7 款) + Cerebras Cloud (GPT-OSS 120B 等 3 款) |
+| MCP | @modelcontextprotocol/sdk（支援 stdio / SSE / streamable-http transport） |
 | 資料庫 | SQLite (better-sqlite3) |
 | 排程 | node-cron |
 | 語言 | TypeScript 5.x |
@@ -150,8 +157,8 @@ lsof -ti :3000 | xargs kill -9
 當使用者的訊息同時匹配多個技能的關鍵字時，系統自動依序執行所有匹配的技能，形成 pipeline：
 
 ```
-使用者：「請用 playwright 彙總網頁 ... 做成一份報告」
-         ↓ 匹配到 "playwright"（總結網頁）+ "報告"（數據故事敘述）
+使用者：「總結 https://www.bbc.com/news/... 內容，做成一份報告」
+         ↓ 匹配到 "總結"（總結網頁）+ "報告"（數據故事敘述）
 
 Skill chaining: 「總結網頁」→「數據故事敘述」
 
@@ -182,7 +189,17 @@ MCP Server 是一個**工具翻譯層**，把複雜的外部服務包裝成 LLM 
 
 ### 目前已整合的 MCP Server
 
-本專案預設配置 2 個 MCP Server，共 25 個工具：
+本專案預設配置 4 個 MCP Server，共 56 個工具：
+
+#### tavily（[Tavily MCP](https://mcp.tavily.com/)，5 個工具）
+
+| # | 工具 | 功能 |
+|---|------|------|
+| 1 | `tavily_search` | 搜尋網路即時資訊 |
+| 2 | `tavily_extract` | 擷取指定 URL 的網頁內容 |
+| 3 | `tavily_crawl` | 爬取整個網站（多頁） |
+| 4 | `tavily_map` | 取得網站地圖結構 |
+| 5 | `tavily_research` | 深度研究特定主題 |
 
 #### browser（[Playwright MCP](https://www.npmjs.com/package/@playwright/mcp)，22 個工具）
 
@@ -211,6 +228,39 @@ MCP Server 是一個**工具翻譯層**，把複雜的外部服務包裝成 LLM 
 | 21 | `browser_wait_for` | 等待文字出現/消失或指定時間 |
 | 22 | `browser_install` | 安裝瀏覽器 |
 
+#### github（[GitHub MCP](https://github.com/modelcontextprotocol/servers/tree/main/src/github)，26 個工具）
+
+搭配 AI 代碼生成功能，可在對話中生成代碼後直接推送到 GitHub repo。
+
+| # | 工具 | 功能 |
+|---|------|------|
+| 1 | `create_or_update_file` | 建立或更新單一檔案 |
+| 2 | `push_files` | 一次推送多個檔案 |
+| 3 | `search_repositories` | 搜尋 GitHub repo |
+| 4 | `create_repository` | 建立新 repo |
+| 5 | `get_file_contents` | 取得檔案內容 |
+| 6 | `fork_repository` | Fork repo |
+| 7 | `create_branch` | 建立分支 |
+| 8 | `list_branches` | 列出分支 |
+| 9 | `create_issue` | 建立 Issue |
+| 10 | `list_issues` | 列出 Issues |
+| 11 | `update_issue` | 更新 Issue |
+| 12 | `add_issue_comment` | Issue 留言 |
+| 13 | `create_pull_request` | 建立 Pull Request |
+| 14 | `list_pull_requests` | 列出 PRs |
+| 15 | `get_pull_request` | 取得 PR 詳情 |
+| 16 | `merge_pull_request` | 合併 PR |
+| 17 | `get_pull_request_diff` | 取得 PR diff |
+| 18 | `list_pull_request_files` | 列出 PR 變更檔案 |
+| 19 | `create_pull_request_review` | PR 審核 |
+| 20 | `search_code` | 搜尋程式碼 |
+| 21 | `search_issues` | 搜尋 Issues |
+| 22 | `search_users` | 搜尋使用者 |
+| 23 | `get_issue` | 取得 Issue 詳情 |
+| 24 | `get_pull_request_comments` | 取得 PR 留言 |
+| 25 | `get_pull_request_reviews` | 取得 PR 審核 |
+| 26 | `get_pull_request_status` | 取得 PR CI 狀態 |
+
 #### test（自建測試用 MCP Server，3 個工具）
 
 | # | 工具 | 功能 |
@@ -227,7 +277,6 @@ MCP Server 是一個**工具翻譯層**，把複雜的外部服務包裝成 LLM 
 |------------|------|
 | [Filesystem](https://github.com/anthropics/mcp-filesystem) | 讀寫本地檔案 |
 | [PostgreSQL](https://github.com/anthropics/mcp-postgres) | 查詢資料庫 |
-| [GitHub](https://github.com/anthropics/mcp-github) | 操作 GitHub |
 | [Slack](https://github.com/anthropics/mcp-slack) | 發送 Slack 訊息 |
 | [Google Maps](https://github.com/anthropics/mcp-google-maps) | 搜尋地點、路線導航 |
 
@@ -238,18 +287,27 @@ MCP Server 是一個**工具翻譯層**，把複雜的外部服務包裝成 LLM 
 **Step 1：設定 `.env`**
 
 ```env
-# stdio（推薦）：MyClaw 自動啟動並管理子程序
+# 本地開發：啟動本地 Chromium（需要瀏覽器環境）
 MCP_SERVERS=[{"name":"browser","transport":{"type":"stdio","command":"npx","args":["@playwright/mcp@latest","--headless","--isolated"]}}]
+
+# 雲端部署（Render 等）：透過 Browserless CDP 連接遠端瀏覽器（免費 1000 次/月）
+MCP_SERVERS=[{"name":"browser","transport":{"type":"stdio","command":"npx","args":["@playwright/mcp@latest","--cdp-endpoint","wss://production-sfo.browserless.io?token=YOUR_TOKEN"]}}]
 ```
 
-支援兩種 transport：
+支援三種 transport：
 - **stdio**（本地子程序，推薦）— MyClaw 自動啟動並管理子程序
 - **sse**（遠端服務）— 適合獨立運行的 MCP Server
+- **streamable-http**（HTTP 串流）— 適合雲端 MCP 服務（如 Tavily）
 
 ```env
 # sse 範例：連線到已啟動的 MCP Server
 MCP_SERVERS=[{"name":"browser","transport":{"type":"sse","url":"http://127.0.0.1:8080/sse"}}]
+
+# streamable-http 範例：Tavily 搜尋/擷取
+MCP_SERVERS=[{"name":"tavily","transport":{"type":"streamable-http","url":"https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_KEY"}}]
 ```
+
+> **部署注意**：Render 等雲端環境無法安裝瀏覽器，Playwright 需改用 [Browserless](https://www.browserless.io/) 雲端模式（免費方案 1,000 units/月，~33 次/天，足夠個人使用）。
 
 **Step 3：建立技能**
 
@@ -281,18 +339,21 @@ MCP_SERVERS=[{"name":"browser","transport":{"type":"sse","url":"http://127.0.0.1
 
 ```env
 MCP_SERVERS=[
-  {"name":"browser","transport":{"type":"sse","url":"http://127.0.0.1:8080/sse"}},
+  {"name":"tavily","transport":{"type":"streamable-http","url":"https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_KEY"}},
+  {"name":"browser","transport":{"type":"stdio","command":"npx","args":["@playwright/mcp@latest","--cdp-endpoint","wss://production-sfo.browserless.io?token=YOUR_TOKEN"]}},
+  {"name":"github","transport":{"type":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-github"],"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"YOUR_TOKEN"}}},
   {"name":"db","transport":{"type":"stdio","command":"npx","args":["@anthropic/mcp-postgres","postgresql://localhost/mydb"]}}
 ]
 ```
 
 ```json
 {
-  "mcp_servers": ["browser", "db"]
+  "builtin_tools": ["save_code", "list_code", "get_code"],
+  "mcp_servers": ["github"]
 }
 ```
 
-這樣技能就能同時操作瀏覽器和查詢資料庫。
+這樣技能同時擁有內建工具（代碼存取）和 GitHub MCP 工具（push_files、create_pull_request 等），AI 可在對話中生成代碼存入 DB 後推送到 GitHub。
 
 ### 測試 MCP 整合
 
@@ -314,6 +375,114 @@ npm run dev
 curl http://localhost:3000/health
 # 回應會包含 mcp.servers 和 mcp.tools
 ```
+
+## 技能建立與測試指南
+
+Render 免費方案會在重新部署時重置 SQLite 資料庫。以下是透過 Telegram / LINE 對話重新建立所有技能的指令和測試方式。
+
+### 技能總覽
+
+| 技能名稱 | 觸發關鍵字 | 功能簡述 | 使用的工具 |
+|----------|-----------|----------|-----------|
+| 網路搜尋 | 搜尋 | 使用 tavily_search 即時搜尋網路資訊 | Tavily MCP |
+| 網頁擷取 | 擷取 | 用 tavily_extract 抓取指定網頁內容 | Tavily MCP |
+| 網站爬取 | 爬取 | 用 tavily_crawl 爬取整個網站 | Tavily MCP |
+| 總結網頁 | 總結 | 用 Playwright 瀏覽器抓取並總結網頁內容 | Playwright MCP |
+| 數據故事敘述 | 報告 | 將數據轉化為敘事報告，可與其他技能 Chaining | prompt-only |
+| 代碼助手 | 寫代碼 | 生成程式碼並存入 SQLite，可推送到 GitHub | builtin + GitHub MCP |
+| 測試 MCP | 測試 | 查時間、抓網頁、執行數學計算（開發驗證用） | test MCP |
+
+### 1. 網路搜尋（Tavily）
+
+**建立指令：**
+
+> 建立技能：網路搜尋，觸發關鍵字是「搜尋」，功能是用 Tavily 搜尋網路上的即時資訊，回傳整理過的重點摘要
+
+**測試：**
+
+> 搜尋 2026 年 AI 最新趨勢
+
+### 2. 網頁擷取（Tavily）
+
+**建立指令：**
+
+> 建立技能：網頁擷取，觸發關鍵字是「擷取」，功能是用 Tavily 擷取指定網頁的內容，轉成乾淨的 Markdown 摘要
+
+**測試：**
+
+> 擷取 https://github.com/anthropics/claude-code
+
+### 3. 網站爬取（Tavily）
+
+**建立指令：**
+
+> 建立技能：網站爬取，觸發關鍵字是「爬取」，功能是用 Tavily 爬取整個網站並整理內容
+
+**測試：**
+
+> 爬取 https://docs.anthropic.com
+
+### 4. 總結網頁（Playwright 瀏覽器）
+
+**建立指令：**
+
+> 建立技能：總結網頁，觸發關鍵字是「總結」，功能是用瀏覽器開啟使用者提供的網頁 URL，擷取頁面內容後用繁體中文摘要
+
+**測試：**
+
+> 總結 https://www.bbc.com/news
+
+### 5. 數據故事敘述（prompt-only + Skill Chaining）
+
+**建立指令：**
+
+> 建立技能：數據故事敘述，觸發關鍵字是「報告」，功能是將原始數據轉化為引人入勝的敘事報告，適合向主管簡報
+
+**測試（Skill Chaining — 同時觸發「總結」+「報告」兩個技能）：**
+
+> 總結 https://www.bbc.com/news 做成一份報告
+
+### 6. 代碼助手（內建工具 + GitHub MCP）
+
+**建立指令：**
+
+> 建立技能：代碼助手，觸發關鍵字是「寫代碼」，功能是生成程式碼並儲存，也能推送到 GitHub
+
+**測試 — 生成代碼並存入 SQLite：**
+
+> 寫代碼：用 TypeScript 寫一個 fibonacci 函式
+
+**測試 — 列出已存代碼：**
+
+> 寫代碼：列出我所有的代碼
+
+**測試 — 推送到 GitHub（需配置 GitHub MCP）：**
+
+> 寫代碼：把 ID 1 的代碼推送到 GitHub repo youtube-topic-finder，帳號 nicklai12
+
+### 7. 測試 MCP（開發用）
+
+**建立指令：**
+
+> 建立技能：測試 MCP，觸發關鍵字是「測試」，功能是查時間、抓網頁、算數學，用來驗證 MCP 工具連線
+
+**測試：**
+
+> 測試 現在台北幾點？
+
+### 建立後確認
+
+建立完所有技能後，發送以下訊息確認：
+
+> 我的技能
+
+應顯示 7 個技能全部 `[ON]`。
+
+### 注意事項
+
+- 每個技能的 `api_config`（包含 `mcp_servers`、`builtin_tools`）由 AI 自動判斷生成
+- 如果 AI 沒有正確加上 `mcp_servers` 或 `builtin_tools`，可刪除重建，用更明確的措辭描述（如「用瀏覽器」「推送到 GitHub」）
+- Skill Chaining 會自動串接同時匹配的技能，不需額外設定
 
 ## 研究文件
 

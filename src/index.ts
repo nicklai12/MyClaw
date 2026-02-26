@@ -8,7 +8,7 @@ import { loadConfig, AppConfig, ChatMessage, RECENT_MESSAGES_COUNT, PlatformType
 import { initLLM, chat, getProviderInfo } from './llm';
 import { initDB, getOrCreateUser, saveMessage, getRecentMessages, getEnabledSkills, getUserSkills, createSkill, findSkillBySourceUrl, updateSkill } from './db';
 import { getUserMemory, updateMemory, buildMemoryUpdatePrompt } from './memory';
-import { isSkillManagementIntent, handleSkillManagement } from './skill-manager';
+import { isSkillManagementIntent, handleSkillManagement, parseSkillFromText } from './skill-manager';
 import { findMatchingSkills, executeSkillChain } from './skill-executor';
 import { isSkillImportIntent, importSkillFromURL } from './skill-importer';
 import { initScheduler } from './scheduler';
@@ -163,7 +163,31 @@ async function handleIncomingMessage(incoming: IncomingMessage): Promise<void> {
       }
     }
 
-    // 6. 一般對話 — 使用 LLM
+    // 6. 技能建立意圖判斷 — 用 AI 解析是否為建立技能的請求
+    try {
+      const skillRequest = await parseSkillFromText(incoming.text);
+      if (skillRequest) {
+        const savedSkill = createSkill(user.id, skillRequest);
+        const apiInfo = skillRequest.api_config
+          ? `\n工具：${[
+              ...(skillRequest.api_config.builtin_tools || []),
+              ...(skillRequest.api_config.mcp_servers?.map(s => `MCP:${s}`) || []),
+            ].join(', ') || '無'}`
+          : '';
+        const reply = `技能「${savedSkill.name}」已建立！\n\n` +
+          `描述：${skillRequest.description}\n` +
+          `觸發方式：${skillRequest.trigger.type}${skillRequest.trigger.value ? ` "${skillRequest.trigger.value}"` : ''}` +
+          apiInfo;
+        await replyFn(reply);
+        saveMessage(user.id, 'assistant', reply);
+        return;
+      }
+    } catch (error) {
+      console.error('[index] 技能建立解析失敗:', error);
+      // 解析失敗不中斷，繼續走一般對話
+    }
+
+    // 7. 一般對話 — 使用 LLM
     const memory = getUserMemory(user.id);
     const recentMessages = getRecentMessages(user.id, RECENT_MESSAGES_COUNT);
 

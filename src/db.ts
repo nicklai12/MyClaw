@@ -8,6 +8,7 @@ import type {
   ScheduledTask,
   SkillCreateRequest,
   SourceType,
+  CodeSnippet,
 } from './config.js';
 
 // ============================================
@@ -124,7 +125,22 @@ function createTables(): void {
   // Backfill：將現有 LINE 使用者的 platform_user_id 設為 line_user_id
   db.exec(`UPDATE users SET platform_user_id = line_user_id WHERE platform_user_id = ''`);
 
-  console.log('[db] 資料表已就緒 (users, skills, messages, scheduled_tasks)');
+  // 代碼片段表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS code_snippets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      language TEXT DEFAULT 'typescript',
+      code TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+  `);
+
+  console.log('[db] 資料表已就緒 (users, skills, messages, scheduled_tasks, code_snippets)');
 }
 
 // ============================================
@@ -370,6 +386,51 @@ export function getUserCredentials(userId: number, service: string): Record<stri
     return null;
   }
 }
+
+// ============================================
+// Code Snippets CRUD
+// ============================================
+
+export function saveCodeSnippet(
+  userId: number,
+  title: string,
+  language: string,
+  code: string,
+  description: string = ''
+): CodeSnippet {
+  const result = db.prepare(`
+    INSERT INTO code_snippets (user_id, title, language, code, description)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(userId, title, language, code, description);
+
+  const snippet = db.prepare(
+    'SELECT * FROM code_snippets WHERE id = ?'
+  ).get(result.lastInsertRowid) as CodeSnippet;
+
+  console.log(`[db] 代碼片段已儲存: "${title}" (id=${snippet.id}, user=${userId}, lang=${language})`);
+  return snippet;
+}
+
+export function listCodeSnippets(userId: number): CodeSnippet[] {
+  return db.prepare(
+    'SELECT * FROM code_snippets WHERE user_id = ? ORDER BY updated_at DESC'
+  ).all(userId) as CodeSnippet[];
+}
+
+export function getCodeSnippet(snippetId: number): CodeSnippet | undefined {
+  return db.prepare(
+    'SELECT * FROM code_snippets WHERE id = ?'
+  ).get(snippetId) as CodeSnippet | undefined;
+}
+
+export function deleteCodeSnippet(snippetId: number): void {
+  db.prepare('DELETE FROM code_snippets WHERE id = ?').run(snippetId);
+  console.log(`[db] 代碼片段已刪除: id=${snippetId}`);
+}
+
+// ============================================
+// Credentials CRUD
+// ============================================
 
 /**
  * 儲存使用者的某個服務憑證

@@ -8,9 +8,10 @@
 import { chat } from './llm';
 import { getUserMemory } from './memory';
 import { getUserCredentials } from './db';
-import { buildGenericTools, parseApiConfig } from './dynamic-tool-builder';
+import { buildGenericTools, buildBuiltinTools, parseApiConfig } from './dynamic-tool-builder';
 import { executeApiCall, createCredentialExecutor } from './http-executor';
 import { getMcpToolsForServers, isMcpToolCall, callMcpTool } from './mcp-client';
+import { isBuiltinToolCall, executeBuiltinTool } from './builtin-executor';
 import type { Skill, ChatMessage, ToolDefinition } from './config';
 
 // ============================================
@@ -113,6 +114,7 @@ function skillHasTools(skill: Skill): boolean {
   if (!apiConfig) return false;
   if (apiConfig.base_url) return true;
   if (apiConfig.mcp_servers && apiConfig.mcp_servers.length > 0) return true;
+  if (apiConfig.builtin_tools && apiConfig.builtin_tools.length > 0) return true;
   return false;
 }
 
@@ -207,6 +209,17 @@ export async function executeSkill(
       );
     }
 
+    // 內建工具：技能透過 api_config.builtin_tools 聲明使用哪些內建工具
+    if (apiConfig?.builtin_tools && apiConfig.builtin_tools.length > 0) {
+      const builtinTools = buildBuiltinTools(apiConfig.builtin_tools);
+      if (builtinTools.length > 0) {
+        toolDefs.push(...builtinTools);
+        console.log(
+          `[skill-executor] 技能「${skill.name}」加入 ${builtinTools.length} 個內建工具 (${apiConfig.builtin_tools.join(', ')})`
+        );
+      }
+    }
+
     // MCP 工具：技能透過 api_config.mcp_servers 聲明使用哪些 MCP server
     if (apiConfig?.mcp_servers && apiConfig.mcp_servers.length > 0) {
       let mcpTools = getMcpToolsForServers(apiConfig.mcp_servers);
@@ -285,6 +298,9 @@ export async function executeSkill(
           // 帳密設定工具
           const credExecutor = createCredentialExecutor(credentialService);
           result = await credExecutor(tc.input, userId);
+        } else if (isBuiltinToolCall(tc.name)) {
+          // 內建工具呼叫
+          result = await executeBuiltinTool(tc.name, tc.input, userId);
         } else if (isMcpToolCall(tc)) {
           // MCP 工具呼叫：路由到對應的 MCP server
           result = await callMcpTool(tc.name, tc.input);
