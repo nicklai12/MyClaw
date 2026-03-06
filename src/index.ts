@@ -6,7 +6,7 @@ import 'dotenv/config';
 import express from 'express';
 import { loadConfig, AppConfig, ChatMessage, RECENT_MESSAGES_COUNT, PlatformType } from './config';
 import { initLLM, chat, getProviderInfo } from './llm';
-import { initDB, getOrCreateUser, saveMessage, getRecentMessages, getEnabledSkills, getUserSkills, createSkill, findSkillBySourceUrl, updateSkill } from './db';
+import { initDB, getOrCreateUser, saveMessage, getRecentMessages, getEnabledSkills, getUserSkills, createSkill, findSkillBySourceUrl, updateSkill, createScheduledTask, skillHasScheduledTask } from './db';
 import { getUserMemory, updateMemory, buildMemoryUpdatePrompt } from './memory';
 import { isSkillManagementIntent, handleSkillManagement, parseSkillFromText } from './skill-manager';
 import { findMatchingSkills, executeSkillChain } from './skill-executor';
@@ -78,6 +78,18 @@ async function handleIncomingMessage(incoming: IncomingMessage): Promise<void> {
           savedSkill = updateSkill(existingSkill.id, result.skill);
           actionLabel = '已更新';
           console.log(`[index] 技能已更新（重複匯入）: id=${savedSkill.id}, name="${savedSkill.name}"`);
+
+          // 如果更新為 cron 類型並有 cron 表達式且不存在定時任務，創建一個
+          if (savedSkill.trigger_type === 'cron'
+              && savedSkill.trigger_value
+              && !skillHasScheduledTask(savedSkill.id)) {
+            try {
+              const scheduledTask = createScheduledTask(savedSkill.id, user.id, savedSkill.trigger_value);
+              console.log(`[index] GitHub 匯入 - 自動創建 cron 定時任務: skill_id=${savedSkill.id}, task_id=${scheduledTask.id}`);
+            } catch (error) {
+              console.error('[index] GitHub 匯入 - 創建定時任務失敗:', error);
+            }
+          }
         } else {
           savedSkill = createSkill(
             user.id,
@@ -87,6 +99,16 @@ async function handleIncomingMessage(incoming: IncomingMessage): Promise<void> {
           );
           actionLabel = '已成功匯入';
           console.log(`[index] 技能已儲存到資料庫: id=${savedSkill.id}, name="${savedSkill.name}"`);
+
+          // 自動為 cron 類型技能創建定時任務
+          if (savedSkill.trigger_type === 'cron' && savedSkill.trigger_value) {
+            try {
+              const scheduledTask = createScheduledTask(savedSkill.id, user.id, savedSkill.trigger_value);
+              console.log(`[index] GitHub 匯入 - 自動創建 cron 定時任務: skill_id=${savedSkill.id}, task_id=${scheduledTask.id}`);
+            } catch (error) {
+              console.error('[index] GitHub 匯入 - 創建定時任務失敗:', error);
+            }
+          }
         }
 
         const warningText = result.warnings.length > 0
@@ -168,6 +190,20 @@ async function handleIncomingMessage(incoming: IncomingMessage): Promise<void> {
       const skillRequest = await parseSkillFromText(incoming.text);
       if (skillRequest) {
         const savedSkill = createSkill(user.id, skillRequest);
+
+        // 自動為 cron 類型技能創建定時任務
+        let scheduleInfo = '';
+        if (savedSkill.trigger_type === 'cron' && savedSkill.trigger_value) {
+          try {
+            const scheduledTask = createScheduledTask(savedSkill.id, user.id, savedSkill.trigger_value);
+            scheduleInfo = `\n定時任務：已創建 (ID: ${scheduledTask.id})`;
+            console.log(`[index] 自動創建 cron 定時任務: skill_id=${savedSkill.id}, task_id=${scheduledTask.id}`);
+          } catch (error) {
+            console.error('[index] 創建定時任務失敗:', error);
+            scheduleInfo = `\n定時任務：創建失敗`;
+          }
+        }
+
         const apiInfo = skillRequest.api_config
           ? `\n工具：${[
               ...(skillRequest.api_config.builtin_tools || []),
@@ -177,7 +213,8 @@ async function handleIncomingMessage(incoming: IncomingMessage): Promise<void> {
         const reply = `技能「${savedSkill.name}」已建立！\n\n` +
           `描述：${skillRequest.description}\n` +
           `觸發方式：${skillRequest.trigger.type}${skillRequest.trigger.value ? ` "${skillRequest.trigger.value}"` : ''}` +
-          apiInfo;
+          apiInfo +
+          scheduleInfo;
         await replyFn(reply);
         saveMessage(user.id, 'assistant', reply);
         return;

@@ -65,6 +65,7 @@ export class TelegramChannel implements MessageChannel {
         text: truncated,
         parse_mode: 'Markdown',
       });
+      console.log(`[telegram-channel] 訊息已發送: chatId=${platformUserId}, length=${truncated.length}`);
     } catch (error) {
       // Markdown 解析失敗時 fallback 為純文字
       console.warn('[telegram-channel] Markdown 發送失敗，改用純文字:', (error as Error).message);
@@ -73,6 +74,7 @@ export class TelegramChannel implements MessageChannel {
           chat_id: platformUserId,
           text: truncated,
         });
+        console.log(`[telegram-channel] 純文字訊息已發送: chatId=${platformUserId}, length=${truncated.length}`);
       } catch (fallbackError) {
         console.error('[telegram-channel] sendMessage 失敗:', fallbackError);
       }

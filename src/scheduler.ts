@@ -77,8 +77,15 @@ async function executeCronSkill(task: ScheduledTask): Promise<void> {
 
       if (channel) {
         try {
-          await channel.push(platformUserId, result);
-          console.log(`[scheduler] 排程結果已發送給用戶: ${platform}:${platformUserId}`);
+          // 檢查結果是否為空
+          if (!result || result.trim() === '') {
+            console.warn(`[scheduler] 技能執行結果為空，跳過發送 (skill_id=${skill.id}, task_id=${task.id})`);
+          } else {
+            // 記錄實際內容（前100字元）
+            console.log(`[scheduler] 技能回傳內容: "${result.substring(0, 100)}${result.length > 100 ? '...' : ''}"`);
+            await channel.push(platformUserId, result);
+            console.log(`[scheduler] 排程結果已發送給用戶: ${platform}:${platformUserId}`);
+          }
         } catch (pushError) {
           console.error('[scheduler] Push 失敗:', pushError);
         }

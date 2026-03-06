@@ -24,7 +24,7 @@ server.tool(
     timezone: z.string().optional().describe('時區名稱（如 Asia/Taipei），預設 UTC'),
   },
   async ({ timezone }) => {
-    const tz = timezone || 'UTC';
+    const tz = timezone || 'Asia/Taipei';  // 修改預設為台北時間
     try {
       const now = new Date();
       const formatted = now.toLocaleString('zh-TW', { timeZone: tz });

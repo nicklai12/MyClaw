@@ -364,6 +364,16 @@ export function updateLastRun(taskId: number): void {
   ).run(taskId);
 }
 
+/**
+ * 檢查技能是否已有對應的活動中的定時任務
+ */
+export function skillHasScheduledTask(skillId: number): boolean {
+  const result = db.prepare(
+    'SELECT COUNT(*) as count FROM scheduled_tasks WHERE skill_id = ? AND enabled = 1'
+  ).get(skillId) as { count: number };
+  return result.count > 0;
+}
+
 // ============================================
 // Credentials CRUD
 // ============================================
