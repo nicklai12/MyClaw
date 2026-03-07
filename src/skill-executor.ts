@@ -407,10 +407,25 @@ function buildSkillSystemPrompt(
     parts.push('- 上方「前置技能已取得的資料」是真實資料，請直接基於這些資料完成你的任務');
     parts.push('- 不需要額外工具，專注在資料的分析、整理和呈現');
   } else {
-    // 無工具且無前置資料 — 明確告知 AI 它沒有 API 存取能力
-    parts.push('- 你目前沒有任何工具可以呼叫外部 API 或取得即時資料');
-    parts.push('- 如果使用者詢問需要即時數據的問題（如查詢、搜尋），請告知他們此技能尚未連接 API，無法提供即時資料');
-    parts.push('- 你只能根據技能指令中的知識回答，不要假裝有查詢結果');
+    // 無工具且無前置資料 — 檢查是否為時間相關技能
+    const isTimeRelated = /時間|報時|幾點|現在.*[幾多].*[點時分]|clock|time/i.test(skill.name + ' ' + skill.prompt);
+
+    if (isTimeRelated) {
+      // 時間相關技能：注入當前時間（台北時間 UTC+8）
+      const now = new Date();
+      // 正確計算台北時間（UTC+8）
+      const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+      const taipeiTime = new Date(utc + (3600000 * 8));
+      const timeString = taipeiTime.toISOString().replace('T', ' ').substring(0, 19);
+      parts.push('## 當前系統時間（台北時間 UTC+8，供你參考）');
+      parts.push(`系統當前時間: ${timeString}`);
+      parts.push('你可以使用這個時間資訊來回答使用者的問題。請注意這是台北時間（UTC+8）。');
+    } else {
+      // 其他無工具技能
+      parts.push('- 你目前沒有任何工具可以呼叫外部 API 或取得即時資料');
+      parts.push('- 如果使用者詢問需要即時數據的問題（如查詢、搜尋），請告知他們此技能尚未連接 API，無法提供即時資料');
+      parts.push('- 你只能根據技能指令中的知識回答，不要假裝有查詢結果');
+    }
   }
 
   return parts.join('\n');

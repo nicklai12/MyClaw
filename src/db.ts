@@ -374,6 +374,13 @@ export function skillHasScheduledTask(skillId: number): boolean {
   return result.count > 0;
 }
 
+export function getScheduledTaskBySkillId(skillId: number): ScheduledTask | null {
+  const row = db.prepare(
+    'SELECT * FROM scheduled_tasks WHERE skill_id = ? ORDER BY id DESC LIMIT 1'
+  ).get(skillId) as ScheduledTask | undefined;
+  return row || null;
+}
+
 // ============================================
 // Credentials CRUD
 // ============================================

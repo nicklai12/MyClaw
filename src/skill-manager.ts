@@ -3,7 +3,8 @@
 // ============================================
 
 import { chat } from './llm';
-import { createSkill, getUserSkills, toggleSkill, deleteSkill, updateSkill } from './db';
+import { getUserSkills, toggleSkill, deleteSkill, getScheduledTaskBySkillId } from './db';
+import { removeCronJob, addCronJob } from './scheduler';
 import type { SkillCreateRequest, Skill } from './config';
 
 // ============================================
@@ -257,7 +258,7 @@ export async function handleSkillManagement(
       normalized.includes('所有技能') ||
       normalized.includes('管理技能')
     ) {
-      const skills = await getUserSkills(userId);
+      const skills = getUserSkills(userId);
       if (skills.length === 0) {
         return '你目前還沒有任何技能。\n\n你可以用自然語言描述想要的功能來建立技能，例如：\n- 「每天早上 8 點提醒我喝水」\n- 「當我說翻譯時，幫我翻譯成英文」\n- 「幫我摘要我傳的連結」';
       }
@@ -270,7 +271,7 @@ export async function handleSkillManagement(
       if (!skillName) {
         return '請指定要停用的技能名稱，例如：「停用 每日天氣提醒」';
       }
-      const skills = await getUserSkills(userId);
+      const skills = getUserSkills(userId);
       const target = findSkillByName(skills, skillName);
       if (!target) {
         return `找不到名為「${skillName}」的技能。輸入「我的技能」查看所有技能。`;
@@ -278,7 +279,16 @@ export async function handleSkillManagement(
       if (target.enabled === 0) {
         return `「${target.name}」已經是停用狀態。`;
       }
-      await toggleSkill(target.id, false);
+      toggleSkill(target.id, false);
+
+      // 如果是 cron 技能，同步停止排程任務
+      if (target.trigger_type === 'cron') {
+        const task = getScheduledTaskBySkillId(target.id);
+        if (task) {
+          removeCronJob(task.id);
+        }
+      }
+
       return `已停用技能「${target.name}」。你可以隨時說「啟用 ${target.name}」來重新啟用。`;
     }
 
@@ -288,7 +298,7 @@ export async function handleSkillManagement(
       if (!skillName) {
         return '請指定要啟用的技能名稱，例如：「啟用 每日天氣提醒」';
       }
-      const skills = await getUserSkills(userId);
+      const skills = getUserSkills(userId);
       const target = findSkillByName(skills, skillName);
       if (!target) {
         return `找不到名為「${skillName}」的技能。輸入「我的技能」查看所有技能。`;
@@ -296,11 +306,19 @@ export async function handleSkillManagement(
       if (target.enabled === 1) {
         return `「${target.name}」已經是啟用狀態。`;
       }
-      await toggleSkill(target.id, true);
+      toggleSkill(target.id, true);
+
+      // 如果是 cron 技能，同步重新啟動排程任務
+      if (target.trigger_type === 'cron' && target.trigger_value) {
+        const task = getScheduledTaskBySkillId(target.id);
+        if (task) {
+          addCronJob(task);
+        }
+      }
+
       return `已啟用技能「${target.name}」。`;
     }
 
-    // 更新技能（修改觸發方式、描述等）
     if (normalized.includes('更新技能') || normalized.includes('修改技能')) {
       const skillName =
         extractSkillName(normalized, '更新技能') ||
@@ -308,7 +326,7 @@ export async function handleSkillManagement(
       if (!skillName) {
         return '請指定要更新的技能名稱和新內容，例如：「更新技能 每日天氣提醒」\n\n目前更新技能最簡單的方式是重新匯入同一個 GitHub URL，系統會自動更新。\n\n你也可以先「刪除技能 [名稱]」再重新建立。';
       }
-      const skills = await getUserSkills(userId);
+      const skills = getUserSkills(userId);
       const target = findSkillByName(skills, skillName);
       if (!target) {
         return `找不到名為「${skillName}」的技能。輸入「我的技能」查看所有技能。`;
@@ -325,12 +343,21 @@ export async function handleSkillManagement(
       if (!skillName) {
         return '請指定要刪除的技能名稱，例如：「刪除技能 每日天氣提醒」';
       }
-      const skills = await getUserSkills(userId);
+      const skills = getUserSkills(userId);
       const target = findSkillByName(skills, skillName);
       if (!target) {
         return `找不到名為「${skillName}」的技能。輸入「我的技能」查看所有技能。`;
       }
-      await deleteSkill(target.id);
+
+      // 如果是 cron 技能，先停止排程任務
+      if (target.trigger_type === 'cron') {
+        const task = getScheduledTaskBySkillId(target.id);
+        if (task) {
+          removeCronJob(task.id);
+        }
+      }
+
+      deleteSkill(target.id);
       return `已刪除技能「${target.name}」。`;
     }
 
