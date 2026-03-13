@@ -8,14 +8,17 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# 複製並安裝依賴
+# 複製並安裝所有依賴（含 devDependencies，編譯需要 typescript）
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci
 
 # 複製原始碼並編譯
 COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
+
+# 移除 devDependencies，只保留 production 依賴
+RUN npm prune --omit=dev
 
 # Production stage
 FROM node:20-slim AS production
