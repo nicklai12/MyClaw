@@ -298,6 +298,11 @@ research/
 │   ├── mcp-integration-analysis.md      # MyClaw 架構與 MCP 整合點分析
 │   └── mcp-chrome-devtools-research.md  # Chrome DevTools MCP Server 研究
 ├── 22-cloud-browser-services/           # 雲端瀏覽器服務（Browserless vs BrowserBase）
+├── 23-ai-code-generation-workflow/      # AI 程式碼生成工作流研究
+├── 24-supabase-mcp-integration/         # Supabase MCP 整合可行性研究
+│   ├── mcp-server-analysis.md           # Supabase MCP Server 功能研究
+│   ├── integration-impact.md            # 整合改動幅度評估
+│   └── applicability-assessment.md      # Supabase 適用性評估
 ├── free-api-alternatives-research.md    # 研究員報告
 └── LINE-CHATBOT-DEPLOYMENT-RESEARCH.md  # 研究員報告
 ```
@@ -1165,3 +1170,180 @@ Phase 4（進階）→ 版本歷史 + 自動修復迴圈 + Gist 分享
 3. **安全第一**：代碼執行必須在沙箱中，E2B 是個人專案最佳選擇
 4. **不要過度設計**：MyClaw 是聊天機器人，代碼生成是輔助功能
 5. **漸進式升級**：先存、再推、後執行，每個階段獨立可交付
+
+---
+
+### Round 12 研究（2026-03-13）— Supabase MCP 整合可行性
+
+> 完整報告：
+> - `research/supabase/mcp-server-analysis.md` — Supabase MCP Server 功能研究
+> - `research/supabase/integration-impact.md` — 整合改動幅度評估
+> - `research/supabase/applicability-assessment.md` — Supabase 適用性評估
+
+#### 24a. 研究問題
+
+1. **能否加上 Supabase MCP？改動幅度大嗎？**
+2. **Supabase 可以適用於這專案嗎？技能和程式碼是否是需要先做持久化的儲存？**
+
+#### 24b. 執行摘要
+
+**結論：可以整合 Supabase MCP，改動幅度極小；但現階段不建議將 SQLite 替換為 Supabase。**
+
+| 評估項 | 結論 |
+|--------|------|
+| **Supabase MCP 整合可行性** | 高度可行，0 行程式碼改動 |
+| **SQLite 替換為 Supabase** | 可行但不建議，改動幅度大 (~500+ 行) |
+| **技能和程式碼持久化必要性** | 高，但可通過其他方案解決 |
+| **推薦方案** | 維持 SQLite + 最小改動 Supabase MCP |
+
+#### 24c. Supabase MCP Server 功能
+
+**官方資源：**
+- npm 套件：`@supabase/mcp-server-supabase`
+- 授權：Apache 2.0 License
+- 安裝：`npx -y @supabase/mcp-server-supabase@latest`
+
+**20+ 個工具，分為 8 個功能群組：**
+
+| 群組 | 關鍵工具 | 用途 |
+|------|---------|------|
+| Database | `execute_sql`, `list_tables` | SQL 查詢、表管理 |
+| Debugging | `get_logs`, `get_advisors` | 日誌、最佳化建議 |
+| Development | `generate_typescript_types` | 生成 TypeScript 類型 |
+| Edge Functions | `deploy_edge_function` | 部署 Edge Function |
+| Account | `list_projects`, `create_project` | 專案管理 |
+| Docs | `search_docs` | 搜尋 Supabase 文件 |
+| Branching | `create_branch`, `merge_branch` | 資料庫分支（付費）|
+| Storage | `list_storage_buckets` | 儲存管理（預設停用）|
+
+**Transport 支援：**
+- STDIO：支援（本地開發）
+- SSE：支援（遠端連線）
+- streamable-http：未明確支援
+
+#### 24d. 整合改動幅度評估
+
+**方案一：最小改動（推薦）**
+
+將 Supabase MCP Server 作為可選工具加入，保留現有 SQLite 架構不變。
+
+```env
+MCP_SERVERS='[{
+  "name": "supabase",
+  "transport": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@supabase/mcp-server-supabase@latest", "--access-token", "<token>"]
+  }
+}]'
+```
+
+| 文件 | 改動內容 | 行數 |
+|------|----------|------|
+| `config.ts` | 無需改動 | 0 |
+| `mcp-client.ts` | 無需改動 | 0 |
+| `skill-executor.ts` | 無需改動 | 0 |
+
+**總改動：0 行程式碼**
+
+**方案二：完整遷移（不建議現階段實施）**
+
+將 SQLite 完全替換為 Supabase PostgreSQL。
+
+| 改動項 | 影響 | 工作量 |
+|--------|------|--------|
+| `db.ts` 重寫 | 替換 better-sqlite3 為 @supabase/supabase-js | ~400 行 |
+| 非同步化改造 | 所有 CRUD 函數改為 async | 10+ 文件 |
+| Schema 遷移 | SQLite → PostgreSQL 語法差異 | 需測試 |
+| 資料遷移 | 使用者資料遷移策略 | 需腳本 |
+
+**總改動：~500+ 行程式碼，高風險**
+
+#### 24e. Supabase 適用性評估
+
+**目前 SQLite 架構優缺點：**
+
+| 優點 | 缺點 |
+|------|------|
+| 零配置 | Render Free Tier 不持久（每次部署資料重置）|
+| 單一文件備份 | 無水平擴展 |
+| 高效讀取（WAL 模式）| 無內建複製 |
+| 無網路延遲 | 無即時訂閱 |
+| 免費 | |
+
+**Supabase Free Tier 限制：**
+
+| 資源 | 限制 |
+|------|------|
+| 資料庫大小 | 500 MB |
+| 儲存空間 | 1 GB |
+| 流量（Egress）| 5 GB/月 |
+| 休眠政策 | 7 天無活動自動暫停 |
+
+**各功能對 MyClaw 的價值：**
+
+| 功能 | 價值評級 | 說明 |
+|------|---------|------|
+| PostgreSQL | 高 | 解決資料持久化問題 |
+| 即時訂閱 | 低 | 現階段不需要 |
+| Auth | 無 | 已有 LINE/Telegram 認證 |
+| Storage | 低 | 現階段不需要 |
+| Edge Functions | 無 | 已有 Express 伺服器 |
+
+**技能與程式碼持久化必要性：**
+
+| 資料類型 | 重要性 | 持久化需求 |
+|----------|--------|-----------|
+| 使用者技能 | 高 | 必須 |
+| 使用者記憶 | 高 | 必須 |
+| 平台憑證 | 高 | 必須 |
+| 程式碼片段 | 中 | 建議 |
+| 對話歷史 | 低 | 可選 |
+
+#### 24f. 解決方案比較
+
+| 方案 | 成本 | 持久化 | 開發成本 | 適用階段 |
+|------|------|--------|----------|----------|
+| **現狀 + 定期備份** | 免費 | 部分 | 低 | 開發/測試 |
+| **Supabase Free** | 免費 | 完整 | 高 | 生產（有風險）|
+| **Litestream + S3** | 低 | 完整 | 中 | 生產 |
+| **Render Disk** | $7/月 | 完整 | 低 | 生產 |
+
+#### 24g. 建議路線圖
+
+**現階段（推薦）：**
+- 維持 SQLite + 定期備份策略
+- 可選擇性整合 Supabase MCP（0 行改動）
+- 實施技能匯出功能，讓使用者可自行備份
+
+**成長期（使用者增長後）：**
+- 升級至 Render Starter ($7/月) + Persistent Disk
+- 或遷移至 Supabase Free Tier（需注意 7 天暫停政策）
+
+**規模化（> 1000 使用者）：**
+- Supabase Pro ($25/月) 或自建 PostgreSQL
+
+#### 24h. 回答原始研究問題
+
+**問題 1：能否加上 Supabase MCP？改動幅度大嗎？**
+
+> **可以，改動幅度極小。**
+>
+> Supabase MCP 可通過現有 MCP Client Manager 接入，只需在 `MCP_SERVERS` 環境變數中新增設定，**0 行程式碼改動**即可使用。
+>
+> 但如果要將 SQLite 替換為 Supabase PostgreSQL，改動幅度很大（~500+ 行），需要重寫所有資料庫操作。
+
+**問題 2：Supabase 可以適用於這專案嗎？技能和程式碼是否是需要先做持久化的儲存？**
+
+> **Supabase 適用於此專案，但現階段不建議遷移。**
+>
+> 原因：
+> 1. **遷移成本高**：需重寫所有 SQL 和資料庫邏輯
+> 2. **功能重疊低**：Supabase 大部分功能（Auth、Storage、Edge Functions）MyClaw 不需要
+> 3. **7天暫停風險**：個人專案可能因無流量被暫停
+> 4. **目前規模小**：SQLite 足以應對
+>
+> 技能和程式碼確實需要持久化，但可通過以下方案解決：
+> - 短期：SQLite + GitHub Actions 自動備份
+> - 中期：Render Starter ($7/月) + Persistent Disk
+> - 長期：Supabase Pro 或自建 PostgreSQL
