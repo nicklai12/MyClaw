@@ -28,8 +28,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 
-# 建立非 root 使用者
-RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+# 建立非 root 使用者（含 home 目錄，npx 需要寫入快取）
+RUN groupadd -r appgroup && useradd -r -g appgroup -m appuser
 
 WORKDIR /app
 
