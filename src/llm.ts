@@ -38,6 +38,7 @@ let currentConfig: AppConfig | null = null;
 let claudeClient: Anthropic | null = null;
 let groqClient: OpenAI | null = null;
 let cerebrasClient: OpenAI | null = null;
+let moonshotClient: OpenAI | null = null;
 
 // ============================================
 // 初始化
@@ -78,6 +79,16 @@ export function initLLM(config: AppConfig): void {
     console.log(`[LLM] Cerebras provider 已初始化 — model: ${cerebras.model}`);
   }
 
+  // 初始化 Moonshot client（OpenAI 相容格式）
+  const moonshot = config.llm.moonshot;
+  if (moonshot) {
+    moonshotClient = new OpenAI({
+      apiKey: moonshot.apiKey,
+      baseURL: 'https://api.moonshot.ai/v1',
+    });
+    console.log(`[LLM] Moonshot provider 已初始化 — model: ${moonshot.model}`);
+  }
+
   console.log(`[LLM] 執行模式: ${provider}`);
 }
 
@@ -106,17 +117,22 @@ export async function chat(options: ChatOptions): Promise<ChatResponse> {
     case 'cerebras-only':
       return chatWithOpenAICompat(options, getCerebrasProvider());
 
+    case 'moonshot-only':
+      return chatWithOpenAICompat(options, getMoonshotProvider());
+
     case 'hybrid': {
       // 混合模式路由：
-      //   complex（報告/生成）→ Claude（品質最好）→ Cerebras（速度快）→ Groq
-      //   simple（tool calling）→ Groq（工具呼叫精準）→ Cerebras（速度快）→ Claude
+      //   complex（報告/生成）→ Claude（品質最好）→ Cerebras（速度快）→ Moonshot → Groq
+      //   simple（tool calling）→ Groq（工具呼叫精準）→ Cerebras（速度快）→ Moonshot → Claude
       if (complexity === 'complex') {
         if (currentConfig.llm.claude) return chatWithClaude(options, complexity);
         if (currentConfig.llm.cerebras) return chatWithOpenAICompat(options, getCerebrasProvider());
+        if (currentConfig.llm.moonshot) return chatWithOpenAICompat(options, getMoonshotProvider());
         if (currentConfig.llm.groq) return chatWithOpenAICompat(options, getGroqProvider());
       } else {
         if (currentConfig.llm.groq) return chatWithOpenAICompat(options, getGroqProvider());
         if (currentConfig.llm.cerebras) return chatWithOpenAICompat(options, getCerebrasProvider());
+        if (currentConfig.llm.moonshot) return chatWithOpenAICompat(options, getMoonshotProvider());
         if (currentConfig.llm.claude) return chatWithClaude(options, complexity);
       }
       throw new Error('[LLM] hybrid 模式但無可用的 provider');
@@ -142,6 +158,7 @@ export function getProviderInfo(): { provider: string; model: string } {
   const { provider, claude, groq } = currentConfig.llm;
 
   const cerebras = currentConfig.llm.cerebras;
+  const moonshot = currentConfig.llm.moonshot;
 
   switch (provider) {
     case 'claude-only':
@@ -159,10 +176,16 @@ export function getProviderInfo(): { provider: string; model: string } {
         provider: 'cerebras-only',
         model: cerebras!.model,
       };
+    case 'moonshot-only':
+      return {
+        provider: 'moonshot-only',
+        model: moonshot!.model,
+      };
     case 'hybrid': {
       const parts: string[] = [];
       if (groq) parts.push(`Groq(${groq.model})`);
       if (cerebras) parts.push(`Cerebras(${cerebras.model})`);
+      if (moonshot) parts.push(`Moonshot(${moonshot.model})`);
       if (claude) parts.push(`Claude(${claude.complexModel})`);
       return {
         provider: 'hybrid',
@@ -386,6 +409,17 @@ function getCerebrasProvider(): OpenAICompatProvider {
     client: cerebrasClient,
     model: currentConfig.llm.cerebras.model,
     providerName: 'cerebras',
+  };
+}
+
+function getMoonshotProvider(): OpenAICompatProvider {
+  if (!moonshotClient || !currentConfig?.llm.moonshot) {
+    throw new Error('[LLM] Moonshot client 未初始化');
+  }
+  return {
+    client: moonshotClient,
+    model: currentConfig.llm.moonshot.model,
+    providerName: 'moonshot',
   };
 }
 

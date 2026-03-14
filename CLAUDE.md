@@ -16,8 +16,10 @@ Telegram ──→   /webhook/line           ├── Claude-only：只有 ANTH
                                        │    └── Qwen3 32B (免費)
                                        ├── Cerebras-only：只有 CEREBRAS_API_KEY
                                        │    └── GPT-OSS 120B (免費, 3000 tok/s)
+                                       ├── Moonshot-only：只有 MOONSHOT_API_KEY
+                                       │    └── Kimi K2.5 (Tool Calling 優秀)
                                        └── 混合模式：>=2 個 API Key
-                                            └── 簡單→Groq/Cerebras, 複雜→Claude
+                                            └── 簡單→Groq/Cerebras/Moonshot, 複雜→Claude
 SQLite (better-sqlite3) + node-cron
 16 個源碼檔案
 ```
@@ -76,7 +78,8 @@ src/
 | AI (模式A) | Groq API (Qwen3 32B) | 免費主力 |
 | AI (模式B) | Claude API (Haiku 4.5 + Sonnet 4.5) | 付費但品質更優 |
 | AI (模式C) | Cerebras Cloud (GPT-OSS 120B) | 免費, 3000 tok/s |
-| AI (模式D) | 混合模式 (>=2 providers) | 最佳 CP 值 |
+| AI (模式D) | Moonshot AI (Kimi K2.5) | Tool Calling 優秀 |
+| AI (模式E) | 混合模式 (>=2 providers) | 最佳 CP 值 |
 | 資料庫 | better-sqlite3 | 最新 |
 | 排程 | node-cron | 最新 |
 | 語言 | TypeScript | 5.x |
@@ -93,7 +96,8 @@ TELEGRAM_BOT_TOKEN=          # Telegram Bot token
 ANTHROPIC_API_KEY=           # Claude API — 填此 key 即啟用 Claude-only 或混合模式
 GROQ_API_KEY=                # Groq API (免費) — 填此 key 即啟用 Groq-only 或混合模式
 CEREBRAS_API_KEY=            # Cerebras Cloud (免費) — 填此 key 即啟用 Cerebras-only 或混合模式
-# >=2 個 LLM key → hybrid 混合模式（簡單→Groq/Cerebras, 複雜→Claude）
+MOONSHOT_API_KEY=            # Moonshot AI (Kimi K2.5) — 填此 key 即啟用 Moonshot-only 或混合模式
+# >=2 個 LLM key → hybrid 混合模式（簡單→Groq/Cerebras/Moonshot, 複雜→Claude）
 # 都不填 → 啟動失敗
 
 # 選填
@@ -101,6 +105,7 @@ CLAUDE_DEFAULT_MODEL=claude-haiku-4-5-20250501    # Claude 主力模型
 CLAUDE_COMPLEX_MODEL=claude-sonnet-4-5-20250514   # Claude 複雜任務模型
 GROQ_MODEL=qwen/qwen3-32b                        # Groq 模型
 CEREBRAS_MODEL=gpt-oss-120b                       # Cerebras 模型
+MOONSHOT_MODEL=kimi-k2-5                          # Moonshot 模型
 PORT=3000                    # HTTP port
 NODE_ENV=development         # development | production
 WEBHOOK_BASE_URL=            # Telegram webhook 自動註冊用（如 https://yourdomain.com）
@@ -208,6 +213,14 @@ scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, ena
 - 免費，速度極快
 - 透過 `CEREBRAS_MODEL` 環境變數切換，啟動時白名單驗證
 
+### Moonshot AI API (Moonshot-only / 混合模式)
+
+- 預設 Model ID: `kimi-k2-5`（Kimi K2.5，Tool Calling 優秀）
+- 另支援 `moonshot-v1-8k`、`moonshot-v1-32k`、`moonshot-v1-128k`（不同 context length）
+- 使用 OpenAI 兼容格式（共用 `chatWithOpenAICompat()`）
+- baseURL: `https://api.moonshot.ai/v1`
+- 透過 `MOONSHOT_MODEL` 環境變數切換，啟動時白名單驗證
+
 ### Provider 自動偵測邏輯
 
 ```
@@ -215,9 +228,10 @@ scheduled_tasks (id, skill_id, user_id, cron_expression, next_run, last_run, ena
 ├── 只有 ANTHROPIC_API_KEY    → claude-only 模式
 ├── 只有 GROQ_API_KEY         → groq-only 模式
 ├── 只有 CEREBRAS_API_KEY     → cerebras-only 模式
+├── 只有 MOONSHOT_API_KEY     → moonshot-only 模式
 ├── >=2 個 LLM API Key        → hybrid 混合模式
-│    ├── complex（報告/生成）→ Claude（品質最好）→ Cerebras（速度快）→ Groq
-│    └── simple（tool calling）→ Groq（工具呼叫精準）→ Cerebras（速度快）→ Claude
+│    ├── complex（報告/生成）→ Claude（品質最好）→ Cerebras（速度快）→ Moonshot → Groq
+│    └── simple（tool calling）→ Groq（工具呼叫精準）→ Cerebras（速度快）→ Moonshot → Claude
 └── 都沒有                     → 啟動失敗，提示使用者
 ```
 

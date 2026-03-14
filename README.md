@@ -15,7 +15,7 @@
 - **技能目錄瀏覽** — 在對話中瀏覽並一鍵安裝熱門技能
 - **使用者記憶** — AI 自動記住你的偏好、習慣和重要資訊
 - **多平台支援** — LINE 和 Telegram，可同時啟用
-- **多 LLM 支援** — Claude API、Groq API（免費）、Cerebras Cloud（免費）、或混合模式，自動偵測
+- **多 LLM 支援** — Claude API、Groq API（免費）、Cerebras Cloud（免費）、Moonshot AI（Kimi K2.5）、或混合模式，自動偵測
 
 ## 快速開始
 
@@ -28,6 +28,7 @@
    - [Anthropic API Key](https://console.anthropic.com/) — 付費，品質最好
    - [Groq API Key](https://console.groq.com/) — 免費，速度快
    - [Cerebras API Key](https://cloud.cerebras.ai/) — 免費，3000 tok/s 極速
+   - [Moonshot API Key](https://platform.moonshot.cn/) — Kimi K2.5，Tool Calling 優秀
    - 填 >=2 個 — 混合模式，最佳 CP 值
 
 ### 方式一：GitHub Codespaces（免費測試）
@@ -105,12 +106,14 @@ TELEGRAM_BOT_TOKEN=          # Telegram Bot token
 ANTHROPIC_API_KEY=           # Claude API
 GROQ_API_KEY=                # Groq API（免費）
 CEREBRAS_API_KEY=            # Cerebras Cloud（免費）
+MOONSHOT_API_KEY=            # Moonshot AI（Kimi K2.5）
 
 # 選填 — 模型切換
 CLAUDE_DEFAULT_MODEL=claude-haiku-4-5-20250501    # Claude 主力模型
 CLAUDE_COMPLEX_MODEL=claude-sonnet-4-5-20250514   # Claude 複雜任務模型
 GROQ_MODEL=moonshotai/kimi-k2-instruct-0905      # Groq 模型（推薦，Tool Calling 最強）
 CEREBRAS_MODEL=gpt-oss-120b                       # Cerebras 模型
+MOONSHOT_MODEL=kimi-k2-5                          # Moonshot 模型（預設 Kimi K2.5）
 
 # 選填 — MCP 工具伺服器
 # Playwright 瀏覽器（二擇一）：
@@ -130,7 +133,8 @@ WEBHOOK_BASE_URL=            # Telegram webhook 自動註冊（如 https://yourd
 | 只填 `ANTHROPIC_API_KEY` | Claude-only（Haiku 4.5 為主） | $1-12 |
 | 只填 `GROQ_API_KEY` | Groq-only（Kimi K2） | $0 |
 | 只填 `CEREBRAS_API_KEY` | Cerebras-only（GPT-OSS 120B） | $0 |
-| 填 >=2 個 LLM Key | 混合模式（tool calling→Groq，報告生成→Cerebras，複雜→Claude） | $0-3 |
+| 只填 `MOONSHOT_API_KEY` | Moonshot-only（Kimi K2.5） | 依用量計費 |
+| 填 >=2 個 LLM Key | 混合模式（tool calling→Groq，報告生成→Cerebras/Moonshot，複雜→Claude） | $0-3 |
 
 ## 專案結構
 
@@ -138,7 +142,7 @@ WEBHOOK_BASE_URL=            # Telegram webhook 自動註冊（如 https://yourd
 src/
 ├── index.ts              # Express 伺服器 + 多平台 Webhook 處理
 ├── config.ts             # 環境變數 + 共用型別 + 模型註冊表
-├── llm.ts                # LLM Provider Pattern（Claude / Groq / Cerebras / 混合）
+├── llm.ts                # LLM Provider Pattern（Claude / Groq / Cerebras / Moonshot / 混合）
 ├── db.ts                 # SQLite 資料庫 + 多平台使用者
 ├── memory.ts             # 使用者記憶系統
 ├── channel.ts            # 訊息平台抽象介面
@@ -176,25 +180,6 @@ MCP 連接 Playwright，支援瀏覽器自動化操作。
 ### 4. github（代碼推送）
 MCP 連接 GitHub API，支援推送代碼、管理 repo。
 
-### 5. supabase（資料庫管理）
-MCP 連接 Supabase，支援 SQL 查詢、表格管理、專案管理等。
-
-| # | 工具 | 功能 |
-|---|------|------|
-| 1 | `execute_sql` | 執行 SQL 查詢 |
-| 2 | `list_tables` | 列出所有表格 |
-| 3 | `list_projects` | 列出所有專案 |
-| 4 | `search_docs` | 搜尋 Supabase 文件 |
-| 5 | `get_logs` | 取得專案日誌 |
-| 6 | `generate_typescript_types` | 生成 TypeScript 型別 |
-
-**設定方式**：
-```env
-MCP_SERVERS=[{"name":"supabase","transport":{"type":"stdio","command":"npx","args":["-y","@supabase/mcp-server-supabase@latest","--access-token","YOUR_SUPABASE_ACCESS_TOKEN"]}}]
-```
-
-取得 Access Token：Supabase Dashboard → Account Settings → Access Tokens
-
 ## 開發指令
 
 ```bash
@@ -222,7 +207,7 @@ lsof -ti :3000 | xargs kill -9
 | HTTP | Express.js |
 | LINE SDK | @line/bot-sdk |
 | Telegram | 原生 fetch API（無額外依賴） |
-| AI | Claude API (Haiku 4.5 / Sonnet 4.5 等) + Groq API (Kimi K2 / Qwen3 32B 等 7 款) + Cerebras Cloud (GPT-OSS 120B 等 3 款) |
+| AI | Claude API (Haiku 4.5 / Sonnet 4.5) + Groq API (Kimi K2 / Qwen3 32B) + Cerebras Cloud (GPT-OSS 120B) + Moonshot AI (Kimi K2.5) |
 | MCP | @modelcontextprotocol/sdk（支援 stdio / SSE / streamable-http transport） |
 | 資料庫 | SQLite (better-sqlite3) |
 | 排程 | node-cron |
@@ -265,7 +250,7 @@ MCP Server 是一個**工具翻譯層**，把複雜的外部服務包裝成 LLM 
 
 ### 目前已整合的 MCP Server
 
-本專案預設配置 4 個 MCP Server，共 56 個工具：
+本專案預設配置 5 個 MCP Server，共 62 個工具：
 
 #### tavily（[Tavily MCP](https://mcp.tavily.com/)，5 個工具）
 
@@ -344,6 +329,26 @@ MCP Server 是一個**工具翻譯層**，把複雜的外部服務包裝成 LLM 
 | 1 | `get_current_time` | 取得指定時區的時間 |
 | 2 | `fetch_webpage` | 抓取網頁純文字內容 |
 | 3 | `calculate` | 數學運算 |
+
+#### supabase（[Supabase MCP](https://github.com/supabase-community/mcp-server-supabase)，6 個工具）
+
+MCP 連接 Supabase，支援 SQL 查詢、表格管理、專案管理等。
+
+| # | 工具 | 功能 |
+|---|------|------|
+| 1 | `execute_sql` | 執行 SQL 查詢 |
+| 2 | `list_tables` | 列出所有表格 |
+| 3 | `list_projects` | 列出所有專案 |
+| 4 | `search_docs` | 搜尋 Supabase 文件 |
+| 5 | `get_logs` | 取得專案日誌 |
+| 6 | `generate_typescript_types` | 生成 TypeScript 型別 |
+
+**設定方式**：
+```env
+MCP_SERVERS=[{"name":"supabase","transport":{"type":"stdio","command":"npx","args":["-y","@supabase/mcp-server-supabase@latest","--access-token","YOUR_SUPABASE_ACCESS_TOKEN"]}}]
+```
+
+取得 Access Token：Supabase Dashboard → Account Settings → Access Tokens
 
 ### 更多社群 MCP Server
 

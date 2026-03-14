@@ -21,7 +21,7 @@ export interface AppConfig {
     botToken: string;
   };
   llm: {
-    provider: 'claude-only' | 'groq-only' | 'cerebras-only' | 'hybrid';
+    provider: 'claude-only' | 'groq-only' | 'cerebras-only' | 'moonshot-only' | 'hybrid';
     claude?: {
       apiKey: string;
       defaultModel: string;
@@ -32,6 +32,10 @@ export interface AppConfig {
       model: string;
     };
     cerebras?: {
+      apiKey: string;
+      model: string;
+    };
+    moonshot?: {
       apiKey: string;
       model: string;
     };
@@ -61,13 +65,14 @@ export function loadConfig(): AppConfig {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   const groqKey = process.env.GROQ_API_KEY;
   const cerebrasKey = process.env.CEREBRAS_API_KEY;
+  const moonshotKey = process.env.MOONSHOT_API_KEY;
 
-  if (!anthropicKey && !groqKey && !cerebrasKey) {
-    throw new Error('至少需要設定 ANTHROPIC_API_KEY、GROQ_API_KEY 或 CEREBRAS_API_KEY 其中之一');
+  if (!anthropicKey && !groqKey && !cerebrasKey && !moonshotKey) {
+    throw new Error('至少需要設定 ANTHROPIC_API_KEY、GROQ_API_KEY、CEREBRAS_API_KEY 或 MOONSHOT_API_KEY 其中之一');
   }
 
   // Provider 偵測：計算有幾個 LLM key
-  const llmCount = [anthropicKey, groqKey, cerebrasKey].filter(Boolean).length;
+  const llmCount = [anthropicKey, groqKey, cerebrasKey, moonshotKey].filter(Boolean).length;
   let provider: AppConfig['llm']['provider'];
   if (llmCount >= 2) {
     provider = 'hybrid';
@@ -75,8 +80,10 @@ export function loadConfig(): AppConfig {
     provider = 'claude-only';
   } else if (groqKey) {
     provider = 'groq-only';
-  } else {
+  } else if (cerebrasKey) {
     provider = 'cerebras-only';
+  } else {
+    provider = 'moonshot-only';
   }
 
   return {
@@ -116,6 +123,12 @@ export function loadConfig(): AppConfig {
         cerebras: {
           apiKey: cerebrasKey,
           model: validateCerebrasModel(process.env.CEREBRAS_MODEL || CEREBRAS_DEFAULT_MODEL),
+        },
+      }),
+      ...(moonshotKey && {
+        moonshot: {
+          apiKey: moonshotKey,
+          model: validateMoonshotModel(process.env.MOONSHOT_MODEL || MOONSHOT_DEFAULT_MODEL),
         },
       }),
     },
@@ -290,7 +303,7 @@ export interface SkillImportResult {
 export interface ModelInfo {
   id: string;
   name: string;
-  provider: 'groq' | 'claude' | 'cerebras';
+  provider: 'groq' | 'claude' | 'cerebras' | 'moonshot';
   toolCalling: boolean;
   /** 需要在 user prompt 結尾附加 /no_think 加速回應（Qwen3 系列） */
   needsNoThink: boolean;
@@ -434,10 +447,50 @@ export const CEREBRAS_MODEL_REGISTRY: Record<string, ModelInfo> = {
   },
 };
 
+export const MOONSHOT_MODEL_REGISTRY: Record<string, ModelInfo> = {
+  'moonshot-v1-8k': {
+    id: 'moonshot-v1-8k',
+    name: 'Moonshot v1 8K',
+    provider: 'moonshot',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '輕量級，適合簡單對話',
+  },
+  'moonshot-v1-32k': {
+    id: 'moonshot-v1-32k',
+    name: 'Moonshot v1 32K',
+    provider: 'moonshot',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '均衡選擇，32K context',
+  },
+  'moonshot-v1-128k': {
+    id: 'moonshot-v1-128k',
+    name: 'Moonshot v1 128K',
+    provider: 'moonshot',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: '長上下文，128K context',
+  },
+  'kimi-k2-5': {
+    id: 'kimi-k2-5',
+    name: 'Kimi K2.5',
+    provider: 'moonshot',
+    toolCalling: true,
+    needsNoThink: false,
+    needsThinkCleanup: false,
+    note: 'Kimi K2.5，Tool Calling 優秀',
+  },
+};
+
 const GROQ_DEFAULT_MODEL = 'qwen/qwen3-32b';
 const CLAUDE_DEFAULT_DEFAULT_MODEL = 'claude-haiku-4-5-20250501';
 const CLAUDE_DEFAULT_COMPLEX_MODEL = 'claude-sonnet-4-5-20250514';
 const CEREBRAS_DEFAULT_MODEL = 'gpt-oss-120b';
+const MOONSHOT_DEFAULT_MODEL = 'kimi-k2-5';
 
 /**
  * 驗證 Groq 模型是否在白名單中，回傳驗證後的 model ID
@@ -479,10 +532,23 @@ function validateCerebrasModel(model: string): string {
 }
 
 /**
+ * 驗證 Moonshot 模型是否在白名單中
+ */
+function validateMoonshotModel(model: string): string {
+  if (MOONSHOT_MODEL_REGISTRY[model]) {
+    return model;
+  }
+  const available = Object.keys(MOONSHOT_MODEL_REGISTRY).join(', ');
+  console.warn(`[config] MOONSHOT_MODEL "${model}" 不在白名單中，改用預設 ${MOONSHOT_DEFAULT_MODEL}`);
+  console.warn(`[config] 可用的 Moonshot 模型: ${available}`);
+  return MOONSHOT_DEFAULT_MODEL;
+}
+
+/**
  * 根據模型 ID 取得模型資訊
  */
 export function getModelInfo(modelId: string): ModelInfo | undefined {
-  return GROQ_MODEL_REGISTRY[modelId] || CLAUDE_MODEL_REGISTRY[modelId] || CEREBRAS_MODEL_REGISTRY[modelId];
+  return GROQ_MODEL_REGISTRY[modelId] || CLAUDE_MODEL_REGISTRY[modelId] || CEREBRAS_MODEL_REGISTRY[modelId] || MOONSHOT_MODEL_REGISTRY[modelId];
 }
 
 // ============================================
