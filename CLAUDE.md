@@ -163,7 +163,7 @@ users (id, line_user_id, display_name, memory_md, credentials, platform, platfor
 skills (
   id, user_id, name, description,
   trigger_type,    -- 'keyword' | 'pattern' | 'cron' | 'manual' | 'always'
-  trigger_value,
+  trigger_value,   -- keyword 類型必須以 '/' 開頭，例如 '/搜尋'、'/時間'
   prompt,
   tools,           -- JSON array (legacy，由 api_config 取代)
   api_config,      -- JSON: ApiConfig | null（外部 API 連線設定）
@@ -303,7 +303,7 @@ Skill chaining: 「總結網頁」→「數據故事敘述」
 
 | 函式 | 職責 |
 |------|------|
-| `findMatchingSkills()` | 收集所有匹配技能（keyword + pattern 全部收集，always 僅在無其他匹配時） |
+| `findMatchingSkills()` | 收集所有匹配技能（keyword 必須以 `/` 開頭且在訊息開頭匹配；pattern + always 維持原有行為） |
 | `sortSkillsForChaining()` | 排序：有工具（API/MCP）的先跑，prompt-only 後跑 |
 | `executeSkillChain()` | Pipeline 主邏輯，單一技能時等同 `executeSkill()` |
 | `findMatchingSkill()` | 向下相容，回傳第一個匹配（供 scheduler 使用） |

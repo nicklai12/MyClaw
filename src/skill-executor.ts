@@ -57,9 +57,12 @@ export function findMatchingSkills(
   const matchedIds = new Set<number>();
 
   // keyword matches — 收集全部
+  // 規範：所有 keyword trigger_value 必須以 / 開頭，例如 /搜尋、/時間
   for (const skill of enabledSkills) {
     if (skill.trigger_type === 'keyword' && skill.trigger_value) {
-      if (text.includes(skill.trigger_value) && !matchedIds.has(skill.id)) {
+      const trigger = skill.trigger_value;
+      // 必須以 / 開頭才視為有效觸發詞
+      if (trigger.startsWith('/') && text.trim().startsWith(trigger)) {
         matched.push(skill);
         matchedIds.add(skill.id);
       }
@@ -315,12 +318,13 @@ export async function executeSkill(
         });
       }
 
+      // Tool result 之後的呼叫：不提供 tools，讓 AI 直接回答
+      // 這避免 Groq 等 provider 在 tool calling loop 中出現「Failed to call a function」錯誤
       response = await chat({
         messages,
         systemPrompt,
         complexity,
         maxTokens,
-        ...(hasTools ? { tools: toolDefs } : {}),
       });
     }
 
